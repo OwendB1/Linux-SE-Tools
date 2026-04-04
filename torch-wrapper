@@ -10,23 +10,18 @@ WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--manual-steamcmd-sh-patch] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
-  --manual-steamcmd-sh-patch
-                         Manually patch torch executable and nearby files to remap
-                         "steam_cmd_legacy_win64" to "steam_cmd_win64".
-                         Creates one-time .bak-steamcmd-exe backups for changed files.
   -h, --help             Show help.
 
 Examples:
   ./$(basename "$0") --run
   ./$(basename "$0") --run -- --help
-  ./$(basename "$0") --run --manual-steamcmd-sh-patch
 USAGE
 }
 
@@ -167,84 +162,6 @@ resolve_torch_exe_required() {
   printf '%s\n' "$exe"
 }
 
-patch_steamcmd_references() {
-  [ "$MANUAL_STEAMCMD_PATCH" -eq 1 ] || return
-  have python3 || err "--manual-steamcmd-sh-patch requires python3"
-
-  local torch_exe
-  torch_exe="$(resolve_torch_exe_required)"
-
-  log "Manual steamcmd patch enabled: patching legacy steamcmd manifest channel."
-
-  local files=()
-  files+=("$torch_exe")
-
-  local torch_exe_dir
-  torch_exe_dir="$(dirname "$torch_exe")"
-  while IFS= read -r -d '' file; do
-    files+=("$file")
-  done < <(find "$torch_exe_dir" -maxdepth 4 -type f \( -iname '*.exe' -o -iname '*.config' -o -iname '*.json' -o -iname '*.txt' -o -iname '*.vdf' \) -print0)
-
-  local file
-  local total_replacements=0
-  local patched_files=0
-  for file in "${files[@]}"; do
-    local count
-    count="$(
-      python3 - "$file" <<'PY'
-import pathlib
-import shutil
-import sys
-
-path = pathlib.Path(sys.argv[1])
-data = path.read_bytes()
-replacements = [
-    ("steam_cmd_legacy_win64", "steam_cmd_win64\0\0\0\0\0\0\0"),
-]
-
-count = 0
-for needle_text, replacement_text in replacements:
-    needle = needle_text.encode("ascii")
-    replacement = replacement_text.encode("ascii")
-    if len(needle) != len(replacement):
-        raise RuntimeError(f"Replacement length mismatch for {needle_text}")
-    hits = data.count(needle)
-    if hits:
-        data = data.replace(needle, replacement)
-        count += hits
-
-    needle_wide = needle_text.encode("utf-16le")
-    replacement_wide = replacement_text.encode("utf-16le")
-    if len(needle_wide) != len(replacement_wide):
-        raise RuntimeError(f"Wide replacement length mismatch for {needle_text}")
-    hits_wide = data.count(needle_wide)
-    if hits_wide:
-        data = data.replace(needle_wide, replacement_wide)
-        count += hits_wide
-
-if count > 0:
-    backup = path.with_name(path.name + ".bak-steamcmd-exe")
-    if not backup.exists():
-        shutil.copy2(path, backup)
-    path.write_bytes(data)
-print(count)
-PY
-    )"
-
-    if [ "$count" -gt 0 ]; then
-      log "Patched $count steamcmd reference(s) in: $file"
-      patched_files=$((patched_files + 1))
-      total_replacements=$((total_replacements + count))
-    fi
-  done
-
-  if [ "$total_replacements" -eq 0 ]; then
-    log "No steamcmd references found to patch in $torch_exe and nearby files."
-  else
-    log "Manual steamcmd patch completed: $total_replacements replacement(s) across $patched_files file(s)."
-  fi
-}
-
 run_torch() {
   local exe
   exe="$(resolve_torch_exe_required)"
@@ -259,7 +176,6 @@ run_torch() {
 RUN=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
-MANUAL_STEAMCMD_PATCH=0
 TORCH_ARGS=()
 
 while [ "$#" -gt 0 ]; do
@@ -286,10 +202,6 @@ while [ "$#" -gt 0 ]; do
       TORCH_EXE="$1"
       shift
       ;;
-    --manual-steamcmd-sh-patch)
-      MANUAL_STEAMCMD_PATCH=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -312,7 +224,6 @@ fi
 
 ensure_linux_dependencies
 download_torch_if_needed
-patch_steamcmd_references
 ensure_winetricks_dependencies
 ensure_wine_windows_version
 run_torch "${TORCH_ARGS[@]}"
