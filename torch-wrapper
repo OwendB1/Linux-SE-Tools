@@ -10,10 +10,11 @@ WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
+  --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
@@ -117,29 +118,13 @@ ensure_wine_windows_version() {
   wine reg add "HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe" /v Version /t REG_SZ /d win10 /f >/dev/null
 }
 
-download_torch_if_needed() {
-  local exe
-  exe="$(resolve_torch_exe_optional || true)"
-  if [ -n "$exe" ]; then
-    log "Detected existing Torch executable at $exe; skipping download."
-    return
-  fi
-
-  log "Downloading latest Torch build from $TORCH_ZIP_URL"
-  rm -f "$TORCH_ZIP_PATH"
-  curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
-
-  rm -rf "$TORCH_DIR"
-  mkdir -p "$TORCH_DIR"
-  unzip -oq "$TORCH_ZIP_PATH" -d "$TORCH_DIR"
-}
-
 resolve_torch_exe_optional() {
   if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
     printf '%s\n' "$TORCH_EXE"
     return
   fi
 
+  local -a exe_candidates=()
   local candidate
   for candidate in \
     "$TORCH_DIR/Torch.exe" \
@@ -147,12 +132,89 @@ resolve_torch_exe_optional() {
     "$TORCH_DIR/torch-server.exe" \
     "$TORCH_DIR/Torch.Server.exe"; do
     if [ -f "$candidate" ]; then
-      printf '%s\n' "$candidate"
-      return
+      exe_candidates+=("$candidate")
     fi
   done
 
-  find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | head -n 1 || true
+  if [ -d "$TORCH_DIR" ]; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      exe_candidates+=("$candidate")
+    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
+  fi
+
+  local -A seen=()
+  local -a unique_candidates=()
+  for candidate in "${exe_candidates[@]}"; do
+    if [ -z "${seen[$candidate]+x}" ]; then
+      seen["$candidate"]=1
+      unique_candidates+=("$candidate")
+    fi
+  done
+
+  local total="${#unique_candidates[@]}"
+  if [ "$total" -eq 0 ]; then
+    return
+  fi
+
+  if [ "$total" -eq 1 ]; then
+    printf '%s\n' "${unique_candidates[0]}"
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Multiple Torch instances detected. Select one to run:"
+    local i
+    for i in "${!unique_candidates[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${unique_candidates[$i]}" >&2
+    done
+
+    local choice
+    while true; do
+      printf 'Enter selection [1-%d]: ' "$total" >&2
+      IFS= read -r choice || break
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total" ]; then
+        printf '%s\n' "${unique_candidates[$((choice - 1))]}"
+        return
+      fi
+      printf 'Invalid selection. Please choose a number between 1 and %d.\n' "$total" >&2
+    done
+  fi
+
+  log "Multiple Torch instances detected in non-interactive mode; defaulting to: ${unique_candidates[0]}"
+  printf '%s\n' "${unique_candidates[0]}"
+}
+
+download_torch() {
+  local target_dir="$1"
+
+  log "Downloading latest Torch build from $TORCH_ZIP_URL"
+  rm -f "$TORCH_ZIP_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
+
+  mkdir -p "$target_dir"
+  unzip -oq "$TORCH_ZIP_PATH" -d "$target_dir"
+  log "Torch extracted to $target_dir"
+}
+
+download_torch_if_needed() {
+  local exe
+  exe="$(resolve_torch_exe_optional || true)"
+  if [ "$INSTALL_NEW" -eq 0 ] && [ -n "$exe" ]; then
+    log "Detected existing Torch executable at $exe; skipping download."
+    return
+  fi
+
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    local instance_dir
+    instance_dir="$TORCH_DIR/instances/torch-$(date +%Y%m%d-%H%M%S)"
+    download_torch "$instance_dir"
+    TORCH_EXE="$(resolve_torch_exe_optional || true)"
+    [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $instance_dir"
+    return
+  fi
+
+  download_torch "$TORCH_DIR"
 }
 
 resolve_torch_exe_required() {
@@ -174,6 +236,7 @@ run_torch() {
 }
 
 RUN=0
+INSTALL_NEW=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
@@ -182,6 +245,10 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --run)
       RUN=1
+      shift
+      ;;
+    --install-new)
+      INSTALL_NEW=1
       shift
       ;;
     --wineprefix)

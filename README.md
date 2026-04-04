@@ -19,15 +19,17 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 5. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
 6. Launch Torch executable via Wine.
 
-If Torch is already installed (an existing executable is detected), download is skipped.
+If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
+When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.
 
 ## Options
 
 ```bash
-./torch-wrapper --run [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-wrapper --run [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 ```
 
 - `--run`: required main action.
+- `--install-new`: force installation of a new Torch instance into `./torch/instances/torch-<timestamp>`.
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
