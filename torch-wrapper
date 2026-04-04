@@ -32,6 +32,14 @@ err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+is_ostree_system() {
+  [ -f /run/ostree-booted ] || have rpm-ostree
+}
+
+is_bazzite() {
+  [ -f /etc/os-release ] && grep -qi '^ID=.*bazzite' /etc/os-release
+}
+
 run_privileged() {
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
     "$@"
@@ -53,6 +61,16 @@ detect_pm() {
 
 install_linux_dependencies() {
   local pm="$1"
+
+  if is_ostree_system; then
+    if is_bazzite; then
+      err "Bazzite uses an immutable rpm-ostree base. Install dependencies with:
+  rpm-ostree install wine winetricks curl unzip cabextract
+Then reboot and rerun this script."
+    fi
+    err "Detected an immutable rpm-ostree system. Install dependencies with rpm-ostree, reboot, then rerun this script."
+  fi
+
   log "Installing dependencies with $pm"
   case "$pm" in
     apt)
@@ -80,7 +98,7 @@ install_linux_dependencies() {
 ensure_linux_dependencies() {
   local missing=0
   local cmd
-  for cmd in wine winetricks curl unzip; do
+  for cmd in wine winetricks curl unzip cabextract; do
     if ! have "$cmd"; then
       missing=1
       break
