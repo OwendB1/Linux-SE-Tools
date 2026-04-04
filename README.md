@@ -39,3 +39,9 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Compatibility
 
 - `./torch-wrapper.sh` is kept as a compatibility shim and forwards to `./torch-wrapper`.
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 (GPL-3.0-or-later).
+If you distribute modified versions, you must also provide the corresponding source code
+under the same GPL terms.
