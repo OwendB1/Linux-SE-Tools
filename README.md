@@ -16,7 +16,8 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
    into the script directory.
 3. Extract Torch to `./torch` (relative to the script location).
 4. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
-5. Launch Torch executable via Wine.
+5. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
+6. Launch Torch executable via Wine.
 
 If Torch is already installed (an existing executable is detected), download is skipped.
 
@@ -30,7 +31,7 @@ If Torch is already installed (an existing executable is detected), download is 
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
-- `--manual-steamcmd-sh-patch`: manually patch the resolved `torch*.exe` and sidecar config files in the same folder, replacing `steamcmd.exe` references with `steamcmd.sh` (null-terminated), while keeping one-time `.bak-steamcmd-exe` backups for changed files.
+- `--manual-steamcmd-sh-patch`: manually patch the resolved `torch*.exe` and nearby files (including `*.exe`, `*.config`, `*.json`, `*.txt`, `*.vdf` up to 4 levels deep), remapping `steam_cmd_legacy_win64` to `steam_cmd_win64` (null-padded), while keeping one-time `.bak-steamcmd-exe` backups for changed files.
 - `-- <torch args>`: pass extra arguments directly to Torch.
 
 ## Compatibility
