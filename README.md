@@ -10,7 +10,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 
 `--run` will:
 
-1. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
+1. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`, `cabextract`) and install them if missing.
 2. Download the latest Torch build from:
    `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
    into the script directory.
@@ -39,6 +39,8 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Compatibility
 
 - `./torch-wrapper.sh` is kept as a compatibility shim and forwards to `./torch-wrapper`.
+- On immutable rpm-ostree distros (including Bazzite), automatic package installation is intentionally blocked. Install dependencies via:
+  `rpm-ostree install wine winetricks curl unzip cabextract`, reboot, then run `./torch-wrapper --run`.
 
 ## License
 
