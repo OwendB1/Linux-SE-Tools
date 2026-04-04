@@ -10,18 +10,23 @@ WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--manual-steamcmd-sh-patch] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
+  --manual-steamcmd-sh-patch
+                         Manually patch torch executable and sidecar configs to replace
+                         "steamcmd.exe" with "steamcmd.sh" (null-terminated).
+                         Creates one-time .bak-steamcmd-exe backups for changed files.
   -h, --help             Show help.
 
 Examples:
   ./$(basename "$0") --run
   ./$(basename "$0") --run -- --help
+  ./$(basename "$0") --run --manual-steamcmd-sh-patch
 USAGE
 }
 
@@ -153,6 +158,69 @@ resolve_torch_exe_required() {
   printf '%s\n' "$exe"
 }
 
+patch_steamcmd_references() {
+  [ "$MANUAL_STEAMCMD_PATCH" -eq 1 ] || return
+  have python3 || err "--manual-steamcmd-sh-patch requires python3"
+
+  local target="steamcmd.exe"
+  local replacement="steamcmd.sh"
+  local replacement_with_null
+  replacement_with_null="${replacement}"$'\0'
+
+  local torch_exe
+  torch_exe="$(resolve_torch_exe_required)"
+
+  log "Manual steamcmd patch enabled: replacing \"$target\" -> \"$replacement\" in Torch executable and nearby config files."
+
+  local files=()
+  files+=("$torch_exe")
+
+  local torch_exe_dir
+  torch_exe_dir="$(dirname "$torch_exe")"
+  while IFS= read -r -d '' file; do
+    files+=("$file")
+  done < <(find "$torch_exe_dir" -maxdepth 1 -type f \( -iname '*.config' -o -iname '*.json' -o -iname '*.txt' \) -print0)
+
+  local file
+  local total_replacements=0
+  local patched_files=0
+  for file in "${files[@]}"; do
+    local count
+    count="$(
+      python3 - "$file" "$target" "$replacement_with_null" <<'PY'
+import pathlib
+import shutil
+import sys
+
+path = pathlib.Path(sys.argv[1])
+needle = sys.argv[2].encode("ascii")
+replacement = sys.argv[3].encode("ascii")
+
+data = path.read_bytes()
+count = data.count(needle)
+if count:
+    backup = path.with_name(path.name + ".bak-steamcmd-exe")
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    path.write_bytes(data.replace(needle, replacement))
+print(count)
+PY
+    )"
+
+    if [ "$count" -gt 0 ]; then
+      log "Patched $count steamcmd reference(s) in: $file"
+      patched_files=$((patched_files + 1))
+      total_replacements=$((total_replacements + count))
+    fi
+  done
+
+  if [ "$total_replacements" -eq 0 ]; then
+    log "No \"$target\" references found to patch in $torch_exe and sidecar configs."
+  else
+    log "Manual steamcmd patch completed: $total_replacements replacement(s) across $patched_files file(s)."
+  fi
+}
+
 run_torch() {
   local exe
   exe="$(resolve_torch_exe_required)"
@@ -167,6 +235,7 @@ run_torch() {
 RUN=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
+MANUAL_STEAMCMD_PATCH=0
 TORCH_ARGS=()
 
 while [ "$#" -gt 0 ]; do
@@ -193,6 +262,10 @@ while [ "$#" -gt 0 ]; do
       TORCH_EXE="$1"
       shift
       ;;
+    --manual-steamcmd-sh-patch)
+      MANUAL_STEAMCMD_PATCH=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -215,5 +288,6 @@ fi
 
 ensure_linux_dependencies
 download_torch_if_needed
+patch_steamcmd_references
 ensure_winetricks_dependencies
 run_torch "${TORCH_ARGS[@]}"

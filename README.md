@@ -23,13 +23,14 @@ If Torch is already installed (an existing executable is detected), download is 
 ## Options
 
 ```bash
-./torch-wrapper --run [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-wrapper --run [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--manual-steamcmd-sh-patch] [-- <torch args>]
 ```
 
 - `--run`: required main action.
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
+- `--manual-steamcmd-sh-patch`: manually patch the resolved `torch*.exe` and sidecar config files in the same folder, replacing `steamcmd.exe` references with `steamcmd.sh` (null-terminated), while keeping one-time `.bak-steamcmd-exe` backups for changed files.
 - `-- <torch args>`: pass extra arguments directly to Torch.
 
 ## Compatibility
