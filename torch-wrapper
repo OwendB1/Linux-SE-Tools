@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="linux-torch-wrapper"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TORCH_DIR="$SCRIPT_DIR/torch"
+TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
+TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
+WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [--run] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+
+Options:
+  --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
+  --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
+  --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
+  --torch-exe <path>     Explicit path to Torch executable.
+  -h, --help             Show help.
+
+Examples:
+  ./$(basename "$0") --run
+  ./$(basename "$0") --run -- --help
+USAGE
+}
+
+log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_privileged() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    "$@"
+  elif have sudo; then
+    sudo "$@"
+  else
+    err "Need root or sudo for dependency install: $*"
+  fi
+}
+
+detect_pm() {
+  if have apt-get; then echo apt; return; fi
+  if have dnf; then echo dnf; return; fi
+  if have yum; then echo yum; return; fi
+  if have pacman; then echo pacman; return; fi
+  if have zypper; then echo zypper; return; fi
+  echo ""
+}
+
+install_linux_dependencies() {
+  local pm="$1"
+  log "Installing dependencies with $pm"
+  case "$pm" in
+    apt)
+      run_privileged apt-get update
+      run_privileged apt-get install -y wine winetricks curl unzip cabextract
+      ;;
+    dnf)
+      run_privileged dnf install -y wine winetricks curl unzip cabextract
+      ;;
+    yum)
+      run_privileged yum install -y wine winetricks curl unzip cabextract
+      ;;
+    pacman)
+      run_privileged pacman -Sy --noconfirm wine winetricks curl unzip cabextract
+      ;;
+    zypper)
+      run_privileged zypper --non-interactive install wine winetricks curl unzip cabextract
+      ;;
+    *)
+      err "Unsupported package manager. Install wine, winetricks, curl, unzip, cabextract manually."
+      ;;
+  esac
+}
+
+ensure_linux_dependencies() {
+  local missing=0
+  local cmd
+  for cmd in wine winetricks curl unzip; do
+    if ! have "$cmd"; then
+      missing=1
+      break
+    fi
+  done
+
+  if [ "$missing" -eq 1 ]; then
+    install_linux_dependencies "$(detect_pm)"
+  else
+    log "Linux dependencies already installed."
+  fi
+}
+
+ensure_winetricks_dependencies() {
+  export WINEPREFIX="$WINEPREFIX"
+  export WINEARCH=win64
+  mkdir -p "$WINEPREFIX"
+
+  local marker="$WINEPREFIX/.torch-wrapper-winetricks-done"
+  if [ -f "$marker" ]; then
+    log "Winetricks bootstrap already completed for this prefix."
+    return
+  fi
+
+  log "Bootstrapping Winetricks dependencies in $WINEPREFIX"
+  winetricks -q corefonts vcrun2022 dotnet48
+  touch "$marker"
+}
+
+download_torch_if_needed() {
+  local exe
+  exe="$(resolve_torch_exe_optional || true)"
+  if [ -n "$exe" ]; then
+    log "Detected existing Torch executable at $exe; skipping download."
+    return
+  fi
+
+  log "Downloading latest Torch build from $TORCH_ZIP_URL"
+  rm -f "$TORCH_ZIP_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
+
+  rm -rf "$TORCH_DIR"
+  mkdir -p "$TORCH_DIR"
+  unzip -oq "$TORCH_ZIP_PATH" -d "$TORCH_DIR"
+}
+
+resolve_torch_exe_optional() {
+  if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
+    printf '%s\n' "$TORCH_EXE"
+    return
+  fi
+
+  local candidate
+  for candidate in \
+    "$TORCH_DIR/Torch.exe" \
+    "$TORCH_DIR/torch.exe" \
+    "$TORCH_DIR/torch-server.exe" \
+    "$TORCH_DIR/Torch.Server.exe"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | head -n 1 || true
+}
+
+resolve_torch_exe_required() {
+  local exe
+  exe="$(resolve_torch_exe_optional || true)"
+  [ -n "$exe" ] || err "Unable to locate Torch executable in $TORCH_DIR"
+  printf '%s\n' "$exe"
+}
+
+run_torch() {
+  local exe
+  exe="$(resolve_torch_exe_required)"
+
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  log "Launching Torch via Wine: $exe"
+  wine "$exe" "$@"
+}
+
+RUN=0
+WINEPREFIX="$WINEPREFIX_DEFAULT"
+TORCH_EXE=""
+TORCH_ARGS=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --run)
+      RUN=1
+      shift
+      ;;
+    --wineprefix)
+      shift
+      [ "$#" -gt 0 ] || err "--wineprefix requires a path"
+      WINEPREFIX="$1"
+      shift
+      ;;
+    --torch-dir)
+      shift
+      [ "$#" -gt 0 ] || err "--torch-dir requires a path"
+      TORCH_DIR="$1"
+      shift
+      ;;
+    --torch-exe)
+      shift
+      [ "$#" -gt 0 ] || err "--torch-exe requires a path"
+      TORCH_EXE="$1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      TORCH_ARGS=("$@")
+      break
+      ;;
+    *)
+      err "Unknown option: $1"
+      ;;
+  esac
+done
+
+if [ "$RUN" -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+ensure_linux_dependencies
+download_torch_if_needed
+ensure_winetricks_dependencies
+run_torch "${TORCH_ARGS[@]}"
