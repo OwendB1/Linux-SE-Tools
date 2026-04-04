@@ -17,7 +17,8 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 3. Extract Torch to `./torch` (relative to the script location).
 4. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
 5. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-6. Launch Torch executable via Wine.
+6. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
+7. Launch Torch executable via Wine.
 
 If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
 When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.

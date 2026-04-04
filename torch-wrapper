@@ -118,6 +118,16 @@ ensure_wine_windows_version() {
   wine reg add "HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe" /v Version /t REG_SZ /d win10 /f >/dev/null
 }
 
+ensure_wine_graphics_compatibility() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
+  # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
+  log "Applying Wine graphics compatibility fix (Direct3D renderer = gdi)"
+  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+}
+
 resolve_torch_exe_optional() {
   if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
     printf '%s\n' "$TORCH_EXE"
@@ -293,4 +303,5 @@ ensure_linux_dependencies
 download_torch_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
+ensure_wine_graphics_compatibility
 run_torch "${TORCH_ARGS[@]}"
