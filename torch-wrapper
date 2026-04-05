@@ -61,14 +61,19 @@ detect_pm() {
 
 install_linux_dependencies() {
   local pm="$1"
+  local missing_deps="$2"
 
   if is_ostree_system; then
     if is_bazzite; then
-      err "Bazzite uses an immutable rpm-ostree base. Install dependencies with:
-  rpm-ostree install wine winetricks curl unzip cabextract
+      err "Bazzite uses an immutable rpm-ostree base.
+Missing dependencies: ${missing_deps:-unknown}
+Install dependencies with:
+  rpm-ostree install ${missing_deps:-wine winetricks curl unzip cabextract}
 Then reboot and rerun this script."
     fi
-    err "Detected an immutable rpm-ostree system. Install dependencies with rpm-ostree, reboot, then rerun this script."
+    err "Detected an immutable rpm-ostree system.
+Missing dependencies: ${missing_deps:-unknown}
+Install dependencies with rpm-ostree, reboot, then rerun this script."
   fi
 
   log "Installing dependencies with $pm"
@@ -96,17 +101,17 @@ Then reboot and rerun this script."
 }
 
 ensure_linux_dependencies() {
-  local missing=0
+  local -a missing_deps=()
   local cmd
   for cmd in wine winetricks curl unzip cabextract; do
     if ! have "$cmd"; then
-      missing=1
-      break
+      missing_deps+=("$cmd")
     fi
   done
 
-  if [ "$missing" -eq 1 ]; then
-    install_linux_dependencies "$(detect_pm)"
+  if [ "${#missing_deps[@]}" -gt 0 ]; then
+    log "Missing Linux dependencies: ${missing_deps[*]}"
+    install_linux_dependencies "$(detect_pm)" "${missing_deps[*]}"
   else
     log "Linux dependencies already installed."
   fi
