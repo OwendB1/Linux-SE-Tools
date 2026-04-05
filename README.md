@@ -14,11 +14,12 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 2. Download the latest Torch build from:
    `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
    into the script directory.
-3. Extract Torch to `./torch` (relative to the script location).
-4. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
-5. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-6. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
-7. Launch Torch executable via Wine or Bottles.
+3. Ensure `./torch/instances` exists, then let you choose an existing instance folder or create a new one.
+4. For new installs, prompt for an instance folder name (default: `torch-<timestamp>` when Enter is pressed), then extract Torch there.
+5. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
+6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
+7. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
+8. Launch Torch executable via Wine or Bottles.
 
 If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
 When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.
@@ -30,7 +31,7 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ```
 
 - `--run`: required main action.
-- `--install-new`: force installation of a new Torch instance into `./torch/instances/torch-<timestamp>`.
+- `--install-new`: force installation into a newly prompted folder under `./torch/instances` (default folder name: `torch-<timestamp>`).
 - `--backend <auto|wine|bottles>`: choose runtime backend. `auto` uses Bottles on Bazzite (when available), otherwise Wine.
 - `--bottle <name>`: Bottles bottle name to use with `--backend bottles` (default: `Torch`).
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
