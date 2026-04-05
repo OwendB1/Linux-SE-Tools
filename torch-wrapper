@@ -5,6 +5,7 @@ set -euo pipefail
 APP_NAME="linux-torch-wrapper"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORCH_DIR="$SCRIPT_DIR/torch"
+INSTANCES_DIR="$SCRIPT_DIR/instances"
 TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
 TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 DATA_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
@@ -14,15 +15,16 @@ BOTTLE_NAME_DEFAULT="Torch"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--instances-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
-  --install-new          Force install into a newly prompted folder under <torch-dir>/instances.
+  --install-new          Force install into a newly prompted folder under <instances-dir> (default: $INSTANCES_DIR).
   --backend <mode>       Runtime backend: auto, wine, bottles (default: $BACKEND_DEFAULT).
   --bottle <name>        Bottles bottle name when backend is bottles (default: $BOTTLE_NAME_DEFAULT).
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
-  --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
+  --torch-dir <path>     Torch install directory for direct executable discovery (default: $TORCH_DIR)
+  --instances-dir <path> Override Torch instances directory (default: $INSTANCES_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
   -h, --help             Show help.
 
@@ -288,7 +290,7 @@ sanitize_instance_name() {
 }
 
 instances_dir_path() {
-  printf '%s/instances\n' "${TORCH_DIR%/}"
+  printf '%s\n' "${INSTANCES_DIR%/}"
 }
 
 ensure_instances_dir() {
@@ -399,20 +401,29 @@ select_existing_or_new_instance_dir() {
 
 ensure_torch_storage_writable() {
   local requested_torch_dir="${TORCH_DIR%/}"
+  local requested_instances_dir="${INSTANCES_DIR%/}"
   local requested_zip_dir
   requested_zip_dir="$(dirname "$TORCH_ZIP_PATH")"
 
-  if is_dir_writable "$requested_torch_dir" && is_dir_writable "$requested_zip_dir"; then
+  if is_dir_writable "$requested_torch_dir" && is_dir_writable "$requested_instances_dir" && is_dir_writable "$requested_zip_dir"; then
     return
   fi
 
   local fallback_root="$DATA_DIR_DEFAULT"
   local fallback_torch_dir="$fallback_root/torch"
   local fallback_zip_path="$fallback_root/torch-server.zip"
-  local fallback_instances_dir="$fallback_torch_dir/instances"
+  local fallback_instances_dir="$fallback_root/instances"
 
-  log "Torch directory is not writable: $requested_torch_dir"
-  log "Switching Torch storage to user-writable location: $fallback_torch_dir"
+  if ! is_dir_writable "$requested_torch_dir"; then
+    log "Torch directory is not writable: $requested_torch_dir"
+  fi
+  if ! is_dir_writable "$requested_instances_dir"; then
+    log "Instances directory is not writable: $requested_instances_dir"
+  fi
+  if ! is_dir_writable "$requested_zip_dir"; then
+    log "Download directory is not writable: $requested_zip_dir"
+  fi
+  log "Switching Torch storage to user-writable location: torch=$fallback_torch_dir instances=$fallback_instances_dir"
 
   mkdir -p "$fallback_torch_dir" "$fallback_instances_dir"
   if [ -d "$requested_torch_dir" ]; then
@@ -421,6 +432,7 @@ ensure_torch_storage_writable() {
   fi
 
   TORCH_DIR="$fallback_torch_dir"
+  INSTANCES_DIR="$fallback_instances_dir"
   TORCH_ZIP_PATH="$fallback_zip_path"
 }
 
@@ -604,6 +616,12 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--torch-dir requires a path"
       TORCH_DIR="$1"
+      shift
+      ;;
+    --instances-dir)
+      shift
+      [ "$#" -gt 0 ] || err "--instances-dir requires a path"
+      INSTANCES_DIR="$1"
       shift
       ;;
     --torch-exe)

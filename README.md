@@ -14,7 +14,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 2. Download the latest Torch build from:
    `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
    into the script directory.
-3. Ensure `./torch/instances` exists, then let you choose an existing instance folder or create a new one.
+3. Ensure `./instances` exists, then let you choose an existing instance folder or create a new one.
 4. For new installs, prompt for an instance folder name (default: `torch-<timestamp>` when Enter is pressed), then extract Torch there.
 5. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
 6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
@@ -27,15 +27,16 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Options
 
 ```bash
-./torch-wrapper --run [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-wrapper --run [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--instances-dir <path>] [--torch-exe <path>] [-- <torch args>]
 ```
 
 - `--run`: required main action.
-- `--install-new`: force installation into a newly prompted folder under `./torch/instances` (default folder name: `torch-<timestamp>`).
+- `--install-new`: force installation into a newly prompted folder under `./instances` (default folder name: `torch-<timestamp>`).
 - `--backend <auto|wine|bottles>`: choose runtime backend. `auto` uses Bottles on Bazzite (when available), otherwise Wine.
 - `--bottle <name>`: Bottles bottle name to use with `--backend bottles` (default: `Torch`).
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
-- `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
+- `--torch-dir <path>`: override Torch root used for direct executable discovery (default: `./torch` beside the wrapper).
+- `--instances-dir <path>`: override instance directory (default: `./instances` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
 - `-- <torch args>`: pass extra arguments directly to Torch.
 
