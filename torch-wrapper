@@ -11,25 +11,28 @@ TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 DATA_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
-BOTTLE_NAME_DEFAULT="Torch"
+DISTROBOX_NAME_DEFAULT="torch-wrapper"
+DISTROBOX_IMAGE_DEFAULT="docker.io/library/ubuntu:24.04"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--instances-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|distrobox>] [--distrobox-name <name>] [--distrobox-image <image>] [--wineprefix <path>] [--torch-dir <path>] [--instances-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
-  --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
-  --install-new          Force install into a newly prompted folder under <instances-dir> (default: $INSTANCES_DIR).
-  --backend <mode>       Runtime backend: auto, wine, bottles (default: $BACKEND_DEFAULT).
-  --bottle <name>        Bottles bottle name when backend is bottles (default: $BOTTLE_NAME_DEFAULT).
-  --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
-  --torch-dir <path>     Torch install directory for direct executable discovery (default: $TORCH_DIR)
-  --instances-dir <path> Override Torch instances directory (default: $INSTANCES_DIR)
-  --torch-exe <path>     Explicit path to Torch executable.
-  -h, --help             Show help.
+  --run                    Check/install dependencies, bootstrap Torch if missing, then run.
+  --install-new            Force install into a newly prompted folder under <instances-dir> (default: $INSTANCES_DIR).
+  --backend <mode>         Runtime backend: auto, wine, distrobox (default: $BACKEND_DEFAULT).
+  --distrobox-name <name>  Distrobox container name when backend is distrobox (default: $DISTROBOX_NAME_DEFAULT).
+  --distrobox-image <img>  Distrobox image for first-time container creation (default: $DISTROBOX_IMAGE_DEFAULT).
+  --wineprefix <path>      Wine prefix path (default: $WINEPREFIX_DEFAULT)
+  --torch-dir <path>       Torch install directory for direct executable discovery (default: $TORCH_DIR)
+  --instances-dir <path>   Override Torch instances directory (default: $INSTANCES_DIR)
+  --torch-exe <path>       Explicit path to Torch executable.
+  -h, --help               Show help.
 
 Examples:
   ./$(basename "$0") --run
+  ./$(basename "$0") --run --backend distrobox
   ./$(basename "$0") --run -- --help
 USAGE
 }
@@ -42,10 +45,6 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 is_ostree_system() {
   [ -f /run/ostree-booted ] || have rpm-ostree
-}
-
-is_bazzite() {
-  [ -f /etc/os-release ] && grep -qi '^ID=.*bazzite' /etc/os-release
 }
 
 run_privileged() {
@@ -67,118 +66,68 @@ detect_pm() {
   echo ""
 }
 
-detect_bottles_cli() {
-  if have bottles-cli; then
-    printf '%s\n' "bottles-cli"
+distrobox_exists() {
+  have distrobox || return 1
+  distrobox list --no-color 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fixq -- "$DISTROBOX_NAME"
+}
+
+ensure_distrobox_exists() {
+  have distrobox || err "Distrobox backend requested but 'distrobox' was not found. Install distrobox and rerun."
+
+  if distrobox_exists; then
+    log "Using existing Distrobox container: $DISTROBOX_NAME"
     return
   fi
 
-  if have flatpak && flatpak info com.usebottles.bottles >/dev/null 2>&1; then
-    printf '%s\n' "flatpak run --command=bottles-cli com.usebottles.bottles"
-    return
-  fi
+  log "Creating Distrobox container: $DISTROBOX_NAME (image: $DISTROBOX_IMAGE)"
+  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" \
+    --volume "$SCRIPT_DIR:$SCRIPT_DIR:rw"
 }
 
-run_bottles_cli() {
-  [ -n "${BOTTLES_CLI_CMD:-}" ] || return 1
-  # shellcheck disable=SC2086
-  $BOTTLES_CLI_CMD "$@"
+run_distrobox() {
+  local cmd="$1"
+  distrobox enter "$DISTROBOX_NAME" -- bash -lc "$cmd"
 }
 
-bottle_path_exists() {
-  local native_path="$HOME/.local/share/bottles/bottles/$BOTTLE_NAME"
-  local flatpak_path="$HOME/.var/app/com.usebottles.bottles/data/bottles/bottles/$BOTTLE_NAME"
-  [ -d "$native_path" ] || [ -d "$flatpak_path" ]
-}
+ensure_distrobox_dependencies() {
+  ensure_distrobox_exists
 
-ensure_bottle_exists() {
-  [ -n "$BOTTLES_CLI_CMD" ] || err "Bottles backend requested but Bottles CLI was not found."
+  log "Ensuring runtime dependencies exist inside Distrobox container"
+  run_distrobox '
+set -euo pipefail
+missing=()
+for cmd in wine winetricks curl unzip cabextract; do
+  command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+done
+if [ "${#missing[@]}" -eq 0 ]; then
+  exit 0
+fi
 
-  if run_bottles_cli list bottles 2>/dev/null | grep -Fixq -- "$BOTTLE_NAME"; then
-    log "Using existing Bottles bottle: $BOTTLE_NAME"
-    return
-  fi
-
-  # Some Bottles CLI versions render `list bottles` as a table/JSON-like payload where a strict
-  # full-line match is unreliable. Fall back to checking canonical bottle storage paths.
-  if bottle_path_exists; then
-    log "Using existing Bottles bottle: $BOTTLE_NAME"
-    return
-  fi
-
-  log "Creating Bottles bottle: $BOTTLE_NAME"
-  if run_bottles_cli new --help >/dev/null 2>&1; then
-    if run_bottles_cli new -b "$BOTTLE_NAME" -e application >/dev/null 2>&1; then
-      return
-    fi
-    if run_bottles_cli new --bottle-name "$BOTTLE_NAME" --environment application >/dev/null 2>&1; then
-      return
-    fi
-  fi
-
-  err "Unable to auto-create Bottles bottle '$BOTTLE_NAME'.
-Please create it in the Bottles app, then rerun:
-  $(basename "$0") --run --backend bottles --bottle \"$BOTTLE_NAME\""
-}
-
-run_bottle_command() {
-  local exe="$1"
-  shift
-  # Prefer explicit long options for better compatibility with wrappers/older CLI parsers.
-  run_bottles_cli run --bottle "$BOTTLE_NAME" --executable "$exe" --args "$*"
-}
-
-ensure_bottles_bootstrap_and_tweaks() {
-  ensure_bottle_exists
-
-  local bottle_marker_safe
-  # Keep '-' at the end of the tr set so it is treated literally (not as a range delimiter).
-  bottle_marker_safe="$(printf '%s' "$BOTTLE_NAME" | tr -c '[:alnum:]. _-' '_' | tr ' ' '_')"
-  local marker="$SCRIPT_DIR/.torch-wrapper-bottles-${bottle_marker_safe}.done"
-
-  log "Initializing Bottles runtime for $BOTTLE_NAME"
-  run_bottle_command "wineboot" "-u" >/dev/null 2>&1 || warn "Failed to run wineboot inside bottle '$BOTTLE_NAME'."
-
-  if [ -f "$marker" ]; then
-    log "Bottles bootstrap already completed for bottle: $BOTTLE_NAME"
-  else
-    log "Bootstrapping Winetricks dependencies in bottle: $BOTTLE_NAME"
-    if run_bottle_command "winetricks" "-q corefonts vcrun2022 dotnet48" >/dev/null 2>&1; then
-      touch "$marker"
-    else
-      warn "Could not run winetricks inside bottle '$BOTTLE_NAME'. Install corefonts/vcrun2022/dotnet48 in Bottles if Torch fails to start."
-    fi
-  fi
-
-  log "Applying Windows version and graphics compatibility tweaks inside bottle: $BOTTLE_NAME"
-  run_bottle_command "reg" "add HKCU\\Software\\Wine\\Version /v Version /t REG_SZ /d win10 /f" >/dev/null 2>&1 || warn "Failed to set HKCU\\Software\\Wine\\Version=win10 in bottle."
-  run_bottle_command "reg" "add HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe /v Version /t REG_SZ /d win10 /f" >/dev/null 2>&1 || warn "Failed to set SteamCMD AppDefault win10 override in bottle."
-  run_bottle_command "reg" "add HKCU\\Software\\Wine\\Direct3D /v renderer /t REG_SZ /d gdi /f" >/dev/null 2>&1 || warn "Failed to set Direct3D renderer=gdi in bottle."
+if command -v apt-get >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wine winetricks curl unzip cabextract
+elif command -v dnf >/dev/null 2>&1; then
+  sudo dnf install -y wine winetricks curl unzip cabextract
+elif command -v yum >/dev/null 2>&1; then
+  sudo yum install -y wine winetricks curl unzip cabextract
+elif command -v pacman >/dev/null 2>&1; then
+  sudo pacman -Sy --noconfirm wine winetricks curl unzip cabextract
+elif command -v zypper >/dev/null 2>&1; then
+  sudo zypper --non-interactive install wine winetricks curl unzip cabextract
+else
+  echo "Unsupported package manager in container; install manually: ${missing[*]}" >&2
+  exit 1
+fi
+'
 }
 
 install_linux_dependencies() {
   local pm="$1"
-  local missing_deps="$2"
 
   if is_ostree_system; then
-    if is_bazzite; then
-      if [ -n "${BOTTLES_CLI_CMD:-}" ]; then
-        log "Bazzite detected. Using Bottles backend instead of host Wine dependencies."
-        BACKEND="bottles"
-        return
-      fi
-      err "Bazzite uses an immutable rpm-ostree base.
-Missing dependencies: ${missing_deps:-unknown}
-Install dependencies with:
-  rpm-ostree install ${missing_deps:-wine winetricks curl unzip cabextract}
-Then reboot and rerun this script.
-
-Or install Bottles and run with:
-  $(basename "$0") --run --backend bottles"
-    fi
-    err "Detected an immutable rpm-ostree system.
-Missing dependencies: ${missing_deps:-unknown}
-Install dependencies with rpm-ostree, reboot, then rerun this script."
+    log "Detected immutable rpm-ostree system. Switching backend to Distrobox."
+    BACKEND="distrobox"
+    return
   fi
 
   log "Installing dependencies with $pm"
@@ -206,8 +155,8 @@ Install dependencies with rpm-ostree, reboot, then rerun this script."
 }
 
 ensure_linux_dependencies() {
-  if [ "$BACKEND" = "bottles" ]; then
-    [ -n "${BOTTLES_CLI_CMD:-}" ] || err "Bottles backend requested but Bottles CLI was not found."
+  if [ "$BACKEND" = "distrobox" ]; then
+    ensure_distrobox_dependencies
     return
   fi
 
@@ -221,7 +170,10 @@ ensure_linux_dependencies() {
 
   if [ "${#missing_deps[@]}" -gt 0 ]; then
     log "Missing Linux dependencies: ${missing_deps[*]}"
-    install_linux_dependencies "$(detect_pm)" "${missing_deps[*]}"
+    install_linux_dependencies "$(detect_pm)"
+    if [ "$BACKEND" = "distrobox" ]; then
+      ensure_distrobox_dependencies
+    fi
   else
     log "Linux dependencies already installed."
   fi
@@ -260,6 +212,43 @@ ensure_wine_graphics_compatibility() {
   # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
   log "Applying Wine graphics compatibility fix (Direct3D renderer = gdi)"
   wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+}
+
+ensure_distrobox_winetricks_and_tweaks() {
+  local marker="$WINEPREFIX/.torch-wrapper-winetricks-done"
+  local wineprefix_q
+  wineprefix_q="$(printf '%q' "$WINEPREFIX")"
+
+  run_distrobox "
+set -euo pipefail
+export WINEPREFIX=$wineprefix_q
+export WINEARCH=win64
+mkdir -p \"\$WINEPREFIX\"
+
+if [ ! -f \"$marker\" ]; then
+  winetricks -q corefonts vcrun2022 dotnet48
+  touch \"$marker\"
+fi
+
+wine reg add 'HKCU\\Software\\Wine\\Version' /v Version /t REG_SZ /d win10 /f >/dev/null
+wine reg add 'HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe' /v Version /t REG_SZ /d win10 /f >/dev/null
+wine reg add 'HKCU\\Software\\Wine\\Direct3D' /v renderer /t REG_SZ /d gdi /f >/dev/null
+"
+}
+
+create_host_launcher() {
+  local exe="$1"
+  local bindir="$HOME/.local/bin"
+  local launcher="$bindir/torch-distrobox"
+
+  mkdir -p "$bindir"
+  cat > "$launcher" <<LAUNCHER
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$(printf '%q' "$SCRIPT_DIR/torch-wrapper")" --run --backend distrobox --distrobox-name "$(printf '%q' "$DISTROBOX_NAME")" --wineprefix "$(printf '%q' "$WINEPREFIX")" --torch-exe "$(printf '%q' "$exe")" -- "\$@"
+LAUNCHER
+  chmod +x "$launcher"
+  log "Host launcher updated: $launcher"
 }
 
 is_dir_writable() {
@@ -420,7 +409,6 @@ ensure_torch_storage_writable() {
   requested_zip_dir="$(dirname "$TORCH_ZIP_PATH")"
 
   if is_dir_writable "$requested_torch_dir" && is_dir_writable "$requested_instances_dir" && is_dir_writable "$requested_zip_dir"; then
-    # Preserve legacy layout expectation even though installs now land in instances/.
     mkdir -p "$requested_torch_dir" "$requested_instances_dir"
     return
   fi
@@ -565,7 +553,7 @@ resolve_torch_exe_required() {
   printf '%s\n' "$exe"
 }
 
-run_torch() {
+run_torch_with_wine() {
   local exe
   exe="$(resolve_torch_exe_required)"
 
@@ -576,19 +564,20 @@ run_torch() {
   wine "$exe" "$@"
 }
 
-run_torch_with_bottles() {
+run_torch_with_distrobox() {
   local exe
   exe="$(resolve_torch_exe_required)"
 
-  ensure_bottles_bootstrap_and_tweaks
-  log "Launching Torch via Bottles (bottle=$BOTTLE_NAME): $exe"
-  if run_bottles_cli run --help >/dev/null 2>&1; then
-    run_bottle_command "$exe" "$*"
-    return
-  fi
+  ensure_distrobox_winetricks_and_tweaks
+  create_host_launcher "$exe"
 
-  err "This Bottles CLI version does not support the 'run' command.
-Please run Torch from the Bottles UI using bottle '$BOTTLE_NAME'."
+  local wineprefix_q exe_q args_q
+  wineprefix_q="$(printf '%q' "$WINEPREFIX")"
+  exe_q="$(printf '%q' "$exe")"
+  args_q="$(printf ' %q' "$@")"
+
+  log "Launching Torch via Distrobox container '$DISTROBOX_NAME': $exe"
+  run_distrobox "export WINEPREFIX=$wineprefix_q; wine $exe_q$args_q"
 }
 
 RUN=0
@@ -597,8 +586,8 @@ WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
 BACKEND="$BACKEND_DEFAULT"
-BOTTLE_NAME="$BOTTLE_NAME_DEFAULT"
-BOTTLES_CLI_CMD="$(detect_bottles_cli || true)"
+DISTROBOX_NAME="$DISTROBOX_NAME_DEFAULT"
+DISTROBOX_IMAGE="$DISTROBOX_IMAGE_DEFAULT"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -612,17 +601,23 @@ while [ "$#" -gt 0 ]; do
       ;;
     --backend)
       shift
-      [ "$#" -gt 0 ] || err "--backend requires a value (auto|wine|bottles)"
+      [ "$#" -gt 0 ] || err "--backend requires a value (auto|wine|distrobox)"
       case "$1" in
-        auto|wine|bottles) BACKEND="$1" ;;
-        *) err "Invalid --backend value: $1 (expected auto|wine|bottles)" ;;
+        auto|wine|distrobox) BACKEND="$1" ;;
+        *) err "Invalid --backend value: $1 (expected auto|wine|distrobox)" ;;
       esac
       shift
       ;;
-    --bottle)
+    --distrobox-name)
       shift
-      [ "$#" -gt 0 ] || err "--bottle requires a name"
-      BOTTLE_NAME="$1"
+      [ "$#" -gt 0 ] || err "--distrobox-name requires a value"
+      DISTROBOX_NAME="$1"
+      shift
+      ;;
+    --distrobox-image)
+      shift
+      [ "$#" -gt 0 ] || err "--distrobox-image requires a value"
+      DISTROBOX_IMAGE="$1"
       shift
       ;;
     --wineprefix)
@@ -670,8 +665,8 @@ if [ "$RUN" -ne 1 ]; then
 fi
 
 if [ "$BACKEND" = "auto" ]; then
-  if is_bazzite && [ -n "$BOTTLES_CLI_CMD" ]; then
-    BACKEND="bottles"
+  if is_ostree_system; then
+    BACKEND="distrobox"
   else
     BACKEND="wine"
   fi
@@ -680,11 +675,11 @@ fi
 ensure_linux_dependencies
 ensure_torch_storage_writable
 download_torch_if_needed
-if [ "$BACKEND" = "bottles" ]; then
-  run_torch_with_bottles "${TORCH_ARGS[@]}"
+if [ "$BACKEND" = "distrobox" ]; then
+  run_torch_with_distrobox "${TORCH_ARGS[@]}"
 else
   ensure_winetricks_dependencies
   ensure_wine_windows_version
   ensure_wine_graphics_compatibility
-  run_torch "${TORCH_ARGS[@]}"
+  run_torch_with_wine "${TORCH_ARGS[@]}"
 fi
