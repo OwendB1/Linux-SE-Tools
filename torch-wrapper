@@ -83,10 +83,23 @@ run_bottles_cli() {
   $BOTTLES_CLI_CMD "$@"
 }
 
+bottle_path_exists() {
+  local native_path="$HOME/.local/share/bottles/bottles/$BOTTLE_NAME"
+  local flatpak_path="$HOME/.var/app/com.usebottles.bottles/data/bottles/bottles/$BOTTLE_NAME"
+  [ -d "$native_path" ] || [ -d "$flatpak_path" ]
+}
+
 ensure_bottle_exists() {
   [ -n "$BOTTLES_CLI_CMD" ] || err "Bottles backend requested but Bottles CLI was not found."
 
   if run_bottles_cli list bottles 2>/dev/null | grep -Fixq -- "$BOTTLE_NAME"; then
+    log "Using existing Bottles bottle: $BOTTLE_NAME"
+    return
+  fi
+
+  # Some Bottles CLI versions render `list bottles` as a table/JSON-like payload where a strict
+  # full-line match is unreliable. Fall back to checking canonical bottle storage paths.
+  if bottle_path_exists; then
     log "Using existing Bottles bottle: $BOTTLE_NAME"
     return
   fi
