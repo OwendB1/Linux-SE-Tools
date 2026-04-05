@@ -34,7 +34,7 @@ Examples:
 USAGE
 }
 
-log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+log() { printf '[%s] %s\n' "$APP_NAME" "$*" >&2; }
 warn() { printf '[%s] warning: %s\n' "$APP_NAME" "$*" >&2; }
 err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
 
@@ -406,6 +406,8 @@ ensure_torch_storage_writable() {
   requested_zip_dir="$(dirname "$TORCH_ZIP_PATH")"
 
   if is_dir_writable "$requested_torch_dir" && is_dir_writable "$requested_instances_dir" && is_dir_writable "$requested_zip_dir"; then
+    # Preserve legacy layout expectation even though installs now land in instances/.
+    mkdir -p "$requested_torch_dir" "$requested_instances_dir"
     return
   fi
 
