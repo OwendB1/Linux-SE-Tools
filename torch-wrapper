@@ -116,7 +116,8 @@ ensure_bottles_bootstrap_and_tweaks() {
   ensure_bottle_exists
 
   local bottle_marker_safe
-  bottle_marker_safe="$(printf '%s' "$BOTTLE_NAME" | tr -c '[:alnum:]._- ' '_' | tr ' ' '_')"
+  # Keep '-' at the end of the tr set so it is treated literally (not as a range delimiter).
+  bottle_marker_safe="$(printf '%s' "$BOTTLE_NAME" | tr -c '[:alnum:]. _-' '_' | tr ' ' '_')"
   local marker="$SCRIPT_DIR/.torch-wrapper-bottles-${bottle_marker_safe}.done"
 
   log "Initializing Bottles runtime for $BOTTLE_NAME"
