@@ -124,56 +124,8 @@ Please create it in the Bottles app, then rerun:
 run_bottle_command() {
   local exe="$1"
   shift
-  local args="$*"
-  local -a exe_candidates=("$exe")
-
-  # Bottles can be picky about builtin command names; try common .exe variants.
-  if [[ "$exe" != */* ]] && [[ "$exe" != *:\\* ]]; then
-    exe_candidates+=("${exe}.exe")
-    case "$exe" in
-      wineboot) exe_candidates+=("C:\\windows\\system32\\wineboot.exe") ;;
-      reg) exe_candidates+=("C:\\windows\\system32\\reg.exe") ;;
-      cmd) exe_candidates+=("cmd.exe" "C:\\windows\\system32\\cmd.exe") ;;
-    esac
-  fi
-
-  local candidate
-  for candidate in "${exe_candidates[@]}"; do
-    # Prefer explicit long options for better compatibility with wrappers/older CLI parsers.
-    if run_bottles_cli run --bottle "$BOTTLE_NAME" --executable "$candidate" --args "$args"; then
-      return 0
-    fi
-  done
-
-  return 1
-}
-
-unix_path_to_wine_z() {
-  local unix_path="$1"
-  if [[ "$unix_path" != /* ]]; then
-    printf '%s\n' "$unix_path"
-    return
-  fi
-
-  # Wine/Bottles maps host root to Z:\ by default.
-  printf 'Z:%s\n' "${unix_path//\//\\}"
-}
-
-run_bottle_exe_with_workdir() {
-  local exe_path="$1"
-  shift
-
-  local exe_dir exe_name wine_dir cmdline
-  exe_dir="$(dirname "$exe_path")"
-  exe_name="$(basename "$exe_path")"
-  wine_dir="$(unix_path_to_wine_z "$exe_dir")"
-
-  cmdline="cd /d \"$wine_dir\" && \"$exe_name\""
-  if [ "$#" -gt 0 ]; then
-    cmdline+=" $*"
-  fi
-
-  run_bottle_command "cmd.exe" "/c $cmdline"
+  # Prefer explicit long options for better compatibility with wrappers/older CLI parsers.
+  run_bottles_cli run --bottle "$BOTTLE_NAME" --executable "$exe" --args "$*"
 }
 
 ensure_bottles_bootstrap_and_tweaks() {
@@ -631,10 +583,7 @@ run_torch_with_bottles() {
   ensure_bottles_bootstrap_and_tweaks
   log "Launching Torch via Bottles (bottle=$BOTTLE_NAME): $exe"
   if run_bottles_cli run --help >/dev/null 2>&1; then
-    if ! run_bottle_exe_with_workdir "$exe" "$@"; then
-      warn "Launching Torch with explicit work directory failed; retrying direct launch."
-      run_bottle_command "$exe" "$*"
-    fi
+    run_bottle_command "$exe" "$*"
     return
   fi
 
