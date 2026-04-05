@@ -10,7 +10,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 
 `--run` will:
 
-1. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`, `cabextract`) and install them if missing.
+1. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`, `cabextract`) and install them if missing (Wine backend).
 2. Download the latest Torch build from:
    `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
    into the script directory.
@@ -18,7 +18,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 4. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
 5. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
 6. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
-7. Launch Torch executable via Wine.
+7. Launch Torch executable via Wine or Bottles.
 
 If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
 When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.
@@ -26,11 +26,13 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Options
 
 ```bash
-./torch-wrapper --run [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-wrapper --run [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 ```
 
 - `--run`: required main action.
 - `--install-new`: force installation of a new Torch instance into `./torch/instances/torch-<timestamp>`.
+- `--backend <auto|wine|bottles>`: choose runtime backend. `auto` uses Bottles on Bazzite (when available), otherwise Wine.
+- `--bottle <name>`: Bottles bottle name to use with `--backend bottles` (default: `Torch`).
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
@@ -41,6 +43,9 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 - `./torch-wrapper.sh` is kept as a compatibility shim and forwards to `./torch-wrapper`.
 - On immutable rpm-ostree distros (including Bazzite), automatic package installation is intentionally blocked. Install dependencies via:
   `rpm-ostree install wine winetricks curl unzip cabextract`, reboot, then run `./torch-wrapper --run`.
+- On Bazzite, Bottles is also supported. Install Bottles (for example via Flatpak) and run:
+  `./torch-wrapper --run --backend bottles` (or leave `--backend auto`).
+- When using Bottles backend, the wrapper attempts the same bootstrap/tweaks flow in that bottle (`corefonts vcrun2022 dotnet48`, win10 override, and `Direct3D\\renderer=gdi`).
 
 ## License
 

@@ -8,14 +8,18 @@ TORCH_DIR="$SCRIPT_DIR/torch"
 TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
 TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
+BACKEND_DEFAULT="auto"
+BOTTLE_NAME_DEFAULT="Torch"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|bottles>] [--bottle <name>] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
   --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
+  --backend <mode>       Runtime backend: auto, wine, bottles (default: $BACKEND_DEFAULT).
+  --bottle <name>        Bottles bottle name when backend is bottles (default: $BOTTLE_NAME_DEFAULT).
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
@@ -28,6 +32,7 @@ USAGE
 }
 
 log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+warn() { printf '[%s] warning: %s\n' "$APP_NAME" "$*" >&2; }
 err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -59,17 +64,93 @@ detect_pm() {
   echo ""
 }
 
+detect_bottles_cli() {
+  if have bottles-cli; then
+    printf '%s\n' "bottles-cli"
+    return
+  fi
+
+  if have flatpak && flatpak info com.usebottles.bottles >/dev/null 2>&1; then
+    printf '%s\n' "flatpak run --command=bottles-cli com.usebottles.bottles"
+    return
+  fi
+}
+
+ensure_bottle_exists() {
+  [ -n "$BOTTLES_CLI_CMD" ] || err "Bottles backend requested but Bottles CLI was not found."
+
+  if $BOTTLES_CLI_CMD list bottles 2>/dev/null | grep -Fqi -- "$BOTTLE_NAME"; then
+    log "Using existing Bottles bottle: $BOTTLE_NAME"
+    return
+  fi
+
+  log "Creating Bottles bottle: $BOTTLE_NAME"
+  if $BOTTLES_CLI_CMD new --help >/dev/null 2>&1; then
+    if $BOTTLES_CLI_CMD new -b "$BOTTLE_NAME" -e application >/dev/null 2>&1; then
+      return
+    fi
+    if $BOTTLES_CLI_CMD new --bottle-name "$BOTTLE_NAME" --environment application >/dev/null 2>&1; then
+      return
+    fi
+  fi
+
+  err "Unable to auto-create Bottles bottle '$BOTTLE_NAME'.
+Please create it in the Bottles app, then rerun:
+  $(basename "$0") --run --backend bottles --bottle \"$BOTTLE_NAME\""
+}
+
+run_bottle_command() {
+  local exe="$1"
+  shift
+  $BOTTLES_CLI_CMD run -b "$BOTTLE_NAME" -e "$exe" --args "$*"
+}
+
+ensure_bottles_bootstrap_and_tweaks() {
+  ensure_bottle_exists
+
+  local bottle_marker_safe
+  bottle_marker_safe="$(printf '%s' "$BOTTLE_NAME" | tr -c '[:alnum:]._- ' '_' | tr ' ' '_')"
+  local marker="$SCRIPT_DIR/.torch-wrapper-bottles-${bottle_marker_safe}.done"
+
+  log "Initializing Bottles runtime for $BOTTLE_NAME"
+  run_bottle_command "wineboot" "-u" >/dev/null 2>&1 || warn "Failed to run wineboot inside bottle '$BOTTLE_NAME'."
+
+  if [ -f "$marker" ]; then
+    log "Bottles bootstrap already completed for bottle: $BOTTLE_NAME"
+  else
+    log "Bootstrapping Winetricks dependencies in bottle: $BOTTLE_NAME"
+    if run_bottle_command "winetricks" "-q corefonts vcrun2022 dotnet48" >/dev/null 2>&1; then
+      touch "$marker"
+    else
+      warn "Could not run winetricks inside bottle '$BOTTLE_NAME'. Install corefonts/vcrun2022/dotnet48 in Bottles if Torch fails to start."
+    fi
+  fi
+
+  log "Applying Windows version and graphics compatibility tweaks inside bottle: $BOTTLE_NAME"
+  run_bottle_command "reg" "add HKCU\\Software\\Wine\\Version /v Version /t REG_SZ /d win10 /f" >/dev/null 2>&1 || warn "Failed to set HKCU\\Software\\Wine\\Version=win10 in bottle."
+  run_bottle_command "reg" "add HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe /v Version /t REG_SZ /d win10 /f" >/dev/null 2>&1 || warn "Failed to set SteamCMD AppDefault win10 override in bottle."
+  run_bottle_command "reg" "add HKCU\\Software\\Wine\\Direct3D /v renderer /t REG_SZ /d gdi /f" >/dev/null 2>&1 || warn "Failed to set Direct3D renderer=gdi in bottle."
+}
+
 install_linux_dependencies() {
   local pm="$1"
   local missing_deps="$2"
 
   if is_ostree_system; then
     if is_bazzite; then
+      if [ -n "${BOTTLES_CLI_CMD:-}" ]; then
+        log "Bazzite detected. Using Bottles backend instead of host Wine dependencies."
+        BACKEND="bottles"
+        return
+      fi
       err "Bazzite uses an immutable rpm-ostree base.
 Missing dependencies: ${missing_deps:-unknown}
 Install dependencies with:
   rpm-ostree install ${missing_deps:-wine winetricks curl unzip cabextract}
-Then reboot and rerun this script."
+Then reboot and rerun this script.
+
+Or install Bottles and run with:
+  $(basename "$0") --run --backend bottles"
     fi
     err "Detected an immutable rpm-ostree system.
 Missing dependencies: ${missing_deps:-unknown}
@@ -101,6 +182,11 @@ Install dependencies with rpm-ostree, reboot, then rerun this script."
 }
 
 ensure_linux_dependencies() {
+  if [ "$BACKEND" = "bottles" ]; then
+    [ -n "${BOTTLES_CLI_CMD:-}" ] || err "Bottles backend requested but Bottles CLI was not found."
+    return
+  fi
+
   local -a missing_deps=()
   local cmd
   for cmd in wine winetricks curl unzip cabextract; do
@@ -269,11 +355,29 @@ run_torch() {
   wine "$exe" "$@"
 }
 
+run_torch_with_bottles() {
+  local exe
+  exe="$(resolve_torch_exe_required)"
+
+  ensure_bottles_bootstrap_and_tweaks
+  log "Launching Torch via Bottles (bottle=$BOTTLE_NAME): $exe"
+  if $BOTTLES_CLI_CMD run --help >/dev/null 2>&1; then
+    run_bottle_command "$exe" "$*"
+    return
+  fi
+
+  err "This Bottles CLI version does not support the 'run' command.
+Please run Torch from the Bottles UI using bottle '$BOTTLE_NAME'."
+}
+
 RUN=0
 INSTALL_NEW=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
+BACKEND="$BACKEND_DEFAULT"
+BOTTLE_NAME="$BOTTLE_NAME_DEFAULT"
+BOTTLES_CLI_CMD="$(detect_bottles_cli || true)"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -283,6 +387,21 @@ while [ "$#" -gt 0 ]; do
       ;;
     --install-new)
       INSTALL_NEW=1
+      shift
+      ;;
+    --backend)
+      shift
+      [ "$#" -gt 0 ] || err "--backend requires a value (auto|wine|bottles)"
+      case "$1" in
+        auto|wine|bottles) BACKEND="$1" ;;
+        *) err "Invalid --backend value: $1 (expected auto|wine|bottles)" ;;
+      esac
+      shift
+      ;;
+    --bottle)
+      shift
+      [ "$#" -gt 0 ] || err "--bottle requires a name"
+      BOTTLE_NAME="$1"
       shift
       ;;
     --wineprefix)
@@ -323,9 +442,21 @@ if [ "$RUN" -ne 1 ]; then
   exit 1
 fi
 
+if [ "$BACKEND" = "auto" ]; then
+  if is_bazzite && [ -n "$BOTTLES_CLI_CMD" ]; then
+    BACKEND="bottles"
+  else
+    BACKEND="wine"
+  fi
+fi
+
 ensure_linux_dependencies
 download_torch_if_needed
-ensure_winetricks_dependencies
-ensure_wine_windows_version
-ensure_wine_graphics_compatibility
-run_torch "${TORCH_ARGS[@]}"
+if [ "$BACKEND" = "bottles" ]; then
+  run_torch_with_bottles "${TORCH_ARGS[@]}"
+else
+  ensure_winetricks_dependencies
+  ensure_wine_windows_version
+  ensure_wine_graphics_compatibility
+  run_torch "${TORCH_ARGS[@]}"
+fi
