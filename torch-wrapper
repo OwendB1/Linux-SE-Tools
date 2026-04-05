@@ -293,6 +293,20 @@ instances_dir_path() {
   printf '%s\n' "${INSTANCES_DIR%/}"
 }
 
+normalize_path_value() {
+  local raw="${1-}"
+  local line normalized=""
+  while IFS= read -r line; do
+    line="${line%$'\r'}"
+    [ -n "${line//[[:space:]]/}" ] || continue
+    normalized="$line"
+  done <<<"$raw"
+
+  normalized="${normalized#\"}"
+  normalized="${normalized%\"}"
+  printf '%s\n' "$normalized"
+}
+
 ensure_instances_dir() {
   local instances_dir
   instances_dir="$(instances_dir_path)"
@@ -439,7 +453,10 @@ ensure_torch_storage_writable() {
 }
 
 resolve_torch_exe_optional() {
-  if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
+  local normalized_torch_exe
+  normalized_torch_exe="$(normalize_path_value "${TORCH_EXE-}")"
+  if [ -n "$normalized_torch_exe" ] && [ -f "$normalized_torch_exe" ]; then
+    TORCH_EXE="$normalized_torch_exe"
     printf '%s\n' "$TORCH_EXE"
     return
   fi
@@ -521,10 +538,10 @@ download_torch_if_needed() {
   ensure_instances_dir
 
   local selected_instance_dir selected_exe
-  selected_instance_dir="$(select_existing_or_new_instance_dir)"
+  selected_instance_dir="$(normalize_path_value "$(select_existing_or_new_instance_dir)")"
 
   if [ "$INSTALL_NEW" -eq 0 ]; then
-    selected_exe="$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)"
+    selected_exe="$(normalize_path_value "$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)")"
     if [ -n "$selected_exe" ]; then
       TORCH_EXE="$selected_exe"
       log "Detected existing Torch executable at $selected_exe; skipping download."
@@ -533,11 +550,11 @@ download_torch_if_needed() {
   fi
 
   if [ "$INSTALL_NEW" -eq 1 ]; then
-    selected_instance_dir="$(choose_new_instance_dir)"
+    selected_instance_dir="$(normalize_path_value "$(choose_new_instance_dir)")"
   fi
 
   download_torch "$selected_instance_dir"
-  TORCH_EXE="$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)"
+  TORCH_EXE="$(normalize_path_value "$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)")"
   [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $selected_instance_dir"
 }
 
