@@ -306,12 +306,6 @@ resolve_torch_exe_optional() {
     return
   fi
 
-  local preferred_exe="$TORCH_DIR/Torch.Server.exe"
-  if [ -f "$preferred_exe" ]; then
-    printf '%s\n' "$preferred_exe"
-    return
-  fi
-
   local -a exe_candidates=()
   local candidate
   for candidate in \
@@ -328,16 +322,7 @@ resolve_torch_exe_optional() {
     while IFS= read -r candidate; do
       [ -n "$candidate" ] || continue
       exe_candidates+=("$candidate")
-    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) ! -path "$TORCH_DIR/instances/*" | sort -f)
-  fi
-
-  # Only fall back to per-installation instance builds if no top-level Torch executable
-  # could be found under TORCH_DIR.
-  if [ "${#exe_candidates[@]}" -eq 0 ] && [ -d "$TORCH_DIR/instances" ]; then
-    while IFS= read -r candidate; do
-      [ -n "$candidate" ] || continue
-      exe_candidates+=("$candidate")
-    done < <(find "$TORCH_DIR/instances" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
+    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
   fi
 
   local -A seen=()
