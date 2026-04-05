@@ -7,6 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORCH_DIR="$SCRIPT_DIR/torch"
 TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
 TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
+DATA_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 BOTTLE_NAME_DEFAULT="Torch"
@@ -246,6 +247,46 @@ ensure_wine_graphics_compatibility() {
   wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
 }
 
+is_dir_writable() {
+  local dir="$1"
+  mkdir -p "$dir" 2>/dev/null || return 1
+
+  local probe="$dir/.torch-wrapper-write-test.$$"
+  if : >"$probe" 2>/dev/null; then
+    rm -f "$probe"
+    return 0
+  fi
+
+  return 1
+}
+
+ensure_torch_storage_writable() {
+  local requested_torch_dir="${TORCH_DIR%/}"
+  local requested_zip_dir
+  requested_zip_dir="$(dirname "$TORCH_ZIP_PATH")"
+
+  if is_dir_writable "$requested_torch_dir" && is_dir_writable "$requested_zip_dir"; then
+    return
+  fi
+
+  local fallback_root="$DATA_DIR_DEFAULT"
+  local fallback_torch_dir="$fallback_root/torch"
+  local fallback_zip_path="$fallback_root/torch-server.zip"
+  local fallback_instances_dir="$fallback_torch_dir/instances"
+
+  log "Torch directory is not writable: $requested_torch_dir"
+  log "Switching Torch storage to user-writable location: $fallback_torch_dir"
+
+  mkdir -p "$fallback_torch_dir" "$fallback_instances_dir"
+  if [ -d "$requested_torch_dir" ]; then
+    log "Copying existing Torch files to user-writable storage"
+    cp -a "$requested_torch_dir/." "$fallback_torch_dir/" 2>/dev/null || warn "Failed to copy some files from $requested_torch_dir to $fallback_torch_dir"
+  fi
+
+  TORCH_DIR="$fallback_torch_dir"
+  TORCH_ZIP_PATH="$fallback_zip_path"
+}
+
 resolve_torch_exe_optional() {
   if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
     printf '%s\n' "$TORCH_EXE"
@@ -459,6 +500,7 @@ if [ "$BACKEND" = "auto" ]; then
 fi
 
 ensure_linux_dependencies
+ensure_torch_storage_writable
 download_torch_if_needed
 if [ "$BACKEND" = "bottles" ]; then
   run_torch_with_bottles "${TORCH_ARGS[@]}"
