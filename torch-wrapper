@@ -76,20 +76,26 @@ detect_bottles_cli() {
   fi
 }
 
+run_bottles_cli() {
+  [ -n "${BOTTLES_CLI_CMD:-}" ] || return 1
+  # shellcheck disable=SC2086
+  $BOTTLES_CLI_CMD "$@"
+}
+
 ensure_bottle_exists() {
   [ -n "$BOTTLES_CLI_CMD" ] || err "Bottles backend requested but Bottles CLI was not found."
 
-  if $BOTTLES_CLI_CMD list bottles 2>/dev/null | grep -Fqi -- "$BOTTLE_NAME"; then
+  if run_bottles_cli list bottles 2>/dev/null | grep -Fixq -- "$BOTTLE_NAME"; then
     log "Using existing Bottles bottle: $BOTTLE_NAME"
     return
   fi
 
   log "Creating Bottles bottle: $BOTTLE_NAME"
-  if $BOTTLES_CLI_CMD new --help >/dev/null 2>&1; then
-    if $BOTTLES_CLI_CMD new -b "$BOTTLE_NAME" -e application >/dev/null 2>&1; then
+  if run_bottles_cli new --help >/dev/null 2>&1; then
+    if run_bottles_cli new -b "$BOTTLE_NAME" -e application >/dev/null 2>&1; then
       return
     fi
-    if $BOTTLES_CLI_CMD new --bottle-name "$BOTTLE_NAME" --environment application >/dev/null 2>&1; then
+    if run_bottles_cli new --bottle-name "$BOTTLE_NAME" --environment application >/dev/null 2>&1; then
       return
     fi
   fi
@@ -102,7 +108,8 @@ Please create it in the Bottles app, then rerun:
 run_bottle_command() {
   local exe="$1"
   shift
-  $BOTTLES_CLI_CMD run -b "$BOTTLE_NAME" -e "$exe" --args "$*"
+  # Prefer explicit long options for better compatibility with wrappers/older CLI parsers.
+  run_bottles_cli run --bottle "$BOTTLE_NAME" --executable "$exe" --args "$*"
 }
 
 ensure_bottles_bootstrap_and_tweaks() {
@@ -361,7 +368,7 @@ run_torch_with_bottles() {
 
   ensure_bottles_bootstrap_and_tweaks
   log "Launching Torch via Bottles (bottle=$BOTTLE_NAME): $exe"
-  if $BOTTLES_CLI_CMD run --help >/dev/null 2>&1; then
+  if run_bottles_cli run --help >/dev/null 2>&1; then
     run_bottle_command "$exe" "$*"
     return
   fi
