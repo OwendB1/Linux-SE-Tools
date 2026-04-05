@@ -18,7 +18,7 @@ Usage: $(basename "$0") [--run] [--install-new] [--backend <auto|wine|bottles>] 
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
-  --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
+  --install-new          Force install into a newly prompted folder under <torch-dir>/instances.
   --backend <mode>       Runtime backend: auto, wine, bottles (default: $BACKEND_DEFAULT).
   --bottle <name>        Bottles bottle name when backend is bottles (default: $BOTTLE_NAME_DEFAULT).
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
@@ -273,6 +273,130 @@ is_dir_writable() {
   return 1
 }
 
+instance_default_name() {
+  printf 'torch-%s\n' "$(date +%Y%m%d-%H%M%S)"
+}
+
+sanitize_instance_name() {
+  local name="$1"
+  name="${name//\//-}"
+  name="${name//\\/-}"
+  name="${name#"${name%%[![:space:]]*}"}"
+  name="${name%"${name##*[![:space:]]}"}"
+  [ -n "$name" ] || name="$(instance_default_name)"
+  printf '%s\n' "$name"
+}
+
+instances_dir_path() {
+  printf '%s/instances\n' "${TORCH_DIR%/}"
+}
+
+ensure_instances_dir() {
+  local instances_dir
+  instances_dir="$(instances_dir_path)"
+  mkdir -p "$instances_dir"
+}
+
+find_torch_exe_in_dir_optional() {
+  local root="$1"
+  [ -d "$root" ] || return
+
+  local -a exe_candidates=()
+  local candidate
+  for candidate in \
+    "$root/Torch.exe" \
+    "$root/torch.exe" \
+    "$root/torch-server.exe" \
+    "$root/Torch.Server.exe"; do
+    if [ -f "$candidate" ]; then
+      exe_candidates+=("$candidate")
+    fi
+  done
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    exe_candidates+=("$candidate")
+  done < <(find "$root" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
+
+  local -A seen=()
+  local -a unique_candidates=()
+  for candidate in "${exe_candidates[@]}"; do
+    if [ -z "${seen[$candidate]+x}" ]; then
+      seen["$candidate"]=1
+      unique_candidates+=("$candidate")
+    fi
+  done
+
+  [ "${#unique_candidates[@]}" -gt 0 ] || return
+  printf '%s\n' "${unique_candidates[0]}"
+}
+
+choose_new_instance_dir() {
+  local instances_dir default_name input_name chosen_name target_dir
+  instances_dir="$(instances_dir_path)"
+  default_name="$(instance_default_name)"
+  input_name=""
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf 'Enter Torch instance folder name [%s]: ' "$default_name" >&2
+    IFS= read -r input_name || true
+  fi
+
+  if [ -z "${input_name:-}" ]; then
+    chosen_name="$default_name"
+  else
+    chosen_name="$(sanitize_instance_name "$input_name")"
+  fi
+
+  target_dir="$instances_dir/$chosen_name"
+  mkdir -p "$target_dir"
+  printf '%s\n' "$target_dir"
+}
+
+select_existing_or_new_instance_dir() {
+  local instances_dir
+  instances_dir="$(instances_dir_path)"
+
+  local -a folders=()
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    folders+=("$entry")
+  done < <(find "$instances_dir" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort -f)
+
+  if [ "${#folders[@]}" -eq 0 ]; then
+    choose_new_instance_dir
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Select Torch instance folder:"
+    local i total choice
+    total="${#folders[@]}"
+    for i in "${!folders[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${folders[$i]}" >&2
+    done
+    printf '  %d) %s\n' "$((total + 1))" "Create new instance folder" >&2
+
+    while true; do
+      printf 'Enter selection [1-%d]: ' "$((total + 1))" >&2
+      IFS= read -r choice || break
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total" ]; then
+        printf '%s/%s\n' "$instances_dir" "${folders[$((choice - 1))]}"
+        return
+      fi
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -eq $((total + 1)) ]; then
+        choose_new_instance_dir
+        return
+      fi
+      printf 'Invalid selection. Please choose a number between 1 and %d.\n' "$((total + 1))" >&2
+    done
+  fi
+
+  log "Non-interactive mode: using first instance folder: ${folders[0]}"
+  printf '%s/%s\n' "$instances_dir" "${folders[0]}"
+}
+
 ensure_torch_storage_writable() {
   local requested_torch_dir="${TORCH_DIR%/}"
   local requested_zip_dir
@@ -380,23 +504,27 @@ download_torch() {
 }
 
 download_torch_if_needed() {
-  local exe
-  exe="$(resolve_torch_exe_optional || true)"
-  if [ "$INSTALL_NEW" -eq 0 ] && [ -n "$exe" ]; then
-    log "Detected existing Torch executable at $exe; skipping download."
-    return
+  ensure_instances_dir
+
+  local selected_instance_dir selected_exe
+  selected_instance_dir="$(select_existing_or_new_instance_dir)"
+
+  if [ "$INSTALL_NEW" -eq 0 ]; then
+    selected_exe="$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)"
+    if [ -n "$selected_exe" ]; then
+      TORCH_EXE="$selected_exe"
+      log "Detected existing Torch executable at $selected_exe; skipping download."
+      return
+    fi
   fi
 
   if [ "$INSTALL_NEW" -eq 1 ]; then
-    local instance_dir
-    instance_dir="$TORCH_DIR/instances/torch-$(date +%Y%m%d-%H%M%S)"
-    download_torch "$instance_dir"
-    TORCH_EXE="$(resolve_torch_exe_optional || true)"
-    [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $instance_dir"
-    return
+    selected_instance_dir="$(choose_new_instance_dir)"
   fi
 
-  download_torch "$TORCH_DIR"
+  download_torch "$selected_instance_dir"
+  TORCH_EXE="$(find_torch_exe_in_dir_optional "$selected_instance_dir" || true)"
+  [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $selected_instance_dir"
 }
 
 resolve_torch_exe_required() {
