@@ -117,7 +117,7 @@ ensure_distrobox_exists() {
 
   if distrobox_exists; then
     log "Using existing Distrobox container: $DISTROBOX_NAME"
-    if ! distrobox enter "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
+    if ! distrobox enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
       err "Unable to enter existing Distrobox container '$DISTROBOX_NAME'. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
     fi
     verify_distrobox_mount_paths
@@ -139,7 +139,7 @@ ensure_distrobox_exists() {
   done
 
   distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" "${volume_args[@]}"
-  if ! distrobox enter "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
+  if ! distrobox enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
     err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
   fi
   verify_distrobox_mount_paths
@@ -194,7 +194,12 @@ run_distrobox() {
     return
   fi
 
-  distrobox enter "$DISTROBOX_NAME" -- bash -lc "$cmd"
+  if have distrobox-enter; then
+    distrobox-enter --name "$DISTROBOX_NAME" --headless -- shell -l -c "$cmd"
+    return
+  fi
+
+  distrobox enter --name "$DISTROBOX_NAME" --headless -- bash -lc "$cmd"
 }
 
 reexec_inside_distrobox_if_needed() {
@@ -216,7 +221,11 @@ reexec_inside_distrobox_if_needed() {
   fi
 
   log "Entering Distrobox container '$DISTROBOX_NAME' and continuing execution there."
-  if ! exec distrobox enter "$DISTROBOX_NAME" -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"; then
+  if have distrobox-enter; then
+    if ! exec distrobox-enter --name "$DISTROBOX_NAME" --headless -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"; then
+      err "Failed to re-enter wrapper inside Distrobox container '$DISTROBOX_NAME'. Verify that '$wrapper_path' is mounted and readable in the container."
+    fi
+  elif ! exec distrobox enter --name "$DISTROBOX_NAME" --headless -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"; then
     err "Failed to re-enter wrapper inside Distrobox container '$DISTROBOX_NAME'. Verify that '$wrapper_path' is mounted and readable in the container."
   fi
 }
