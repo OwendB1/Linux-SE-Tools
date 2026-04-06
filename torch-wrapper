@@ -208,14 +208,8 @@ ensure_wine_graphics_compatibility() {
 
   # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
   # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
-  # When invoked through `distrobox-enter -r`, Wine can behave differently across 32-bit/64-bit
-  # registry views, so write both views explicitly to keep behavior consistent.
-  # Also disable winevulkan explicitly so Wine cannot pick a Vulkan path even when available.
-  log "Applying Wine graphics compatibility fix (renderer=gdi, winevulkan=disabled, 32/64-bit views)"
-  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f /reg:64 >/dev/null
-  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f /reg:32 >/dev/null
-  wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v winevulkan /t REG_SZ /d disabled /f /reg:64 >/dev/null
-  wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v winevulkan /t REG_SZ /d disabled /f /reg:32 >/dev/null
+  log "Applying Wine graphics compatibility fix (Direct3D renderer = gdi)"
+  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
 }
 
 resolve_torch_exe_optional() {
