@@ -13,7 +13,7 @@ DATA_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 DISTROBOX_NAME_DEFAULT="torch-wrapper"
-DISTROBOX_IMAGE_DEFAULT="docker.io/library/debian:stable-slim"
+DISTROBOX_IMAGE_DEFAULT=""
 BACKEND_SET_BY_ARG=0
 IN_DISTROBOX_MARKER="${TORCH_WRAPPER_INSIDE_DISTROBOX:-0}"
 
@@ -26,7 +26,7 @@ Options:
   --install-new            Force install into a newly prompted folder under <instances-dir> (default: $INSTANCES_DIR).
   --backend <mode>         Runtime backend: auto, wine, distrobox (default: $BACKEND_DEFAULT).
   --distrobox-name <name>  Distrobox container name when backend is distrobox (default: $DISTROBOX_NAME_DEFAULT).
-  --distrobox-image <img>  Distrobox image for first-time container creation (default: $DISTROBOX_IMAGE_DEFAULT).
+  --distrobox-image <img>  Distrobox image for first-time container creation (default: distrobox built-in default image).
   --wineprefix <path>      Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>       Torch install directory for direct executable discovery (default: $TORCH_DIR)
   --instances-dir <path>   Override Torch instances directory (default: $INSTANCES_DIR)
@@ -90,8 +90,13 @@ ensure_distrobox_exists() {
     return
   fi
 
-  log "Creating Distrobox container: $DISTROBOX_NAME (image: $DISTROBOX_IMAGE)"
-  local -a create_cmd=(distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --home "$LAUNCH_CWD")
+  local -a create_cmd=(distrobox create --yes --name "$DISTROBOX_NAME" --home "$LAUNCH_CWD")
+  if [ -n "$DISTROBOX_IMAGE" ]; then
+    create_cmd+=(--image "$DISTROBOX_IMAGE")
+    log "Creating Distrobox container: $DISTROBOX_NAME (image: $DISTROBOX_IMAGE)"
+  else
+    log "Creating Distrobox container: $DISTROBOX_NAME (image: distrobox built-in default)"
+  fi
 
   "${create_cmd[@]}"
   if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
