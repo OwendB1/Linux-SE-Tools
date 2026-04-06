@@ -92,22 +92,6 @@ required_distrobox_mount_paths() {
   printf '%s\n' "${paths[@]}"
 }
 
-verify_distrobox_mount_paths() {
-  local path probe probe_q
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    mkdir -p "$path"
-    probe="$path/.torch-wrapper-mount-check.$$"
-    : > "$probe"
-    probe_q="$(printf '%q' "$probe")"
-    if ! run_distrobox "[ -f $probe_q ]"; then
-      rm -f "$probe"
-      err "Distrobox container '$DISTROBOX_NAME' is missing required mount path: $path. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
-    fi
-    rm -f "$probe"
-  done < <(required_distrobox_mount_paths)
-}
-
 ensure_distrobox_exists() {
   if [ "$IN_DISTROBOX_MARKER" = "1" ]; then
     return
@@ -118,10 +102,6 @@ ensure_distrobox_exists() {
 
   if distrobox_exists; then
     log "Using existing Distrobox container: $DISTROBOX_NAME"
-    if ! distrobox-enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
-      err "Unable to enter existing Distrobox container '$DISTROBOX_NAME'. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
-    fi
-    verify_distrobox_mount_paths
     return
   fi
 
@@ -140,10 +120,6 @@ ensure_distrobox_exists() {
   done
 
   distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" "${volume_args[@]}"
-  if ! distrobox-enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
-    err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
-  fi
-  verify_distrobox_mount_paths
 }
 
 prompt_backend_selection() {
@@ -205,7 +181,7 @@ reexec_inside_distrobox_if_needed() {
   ensure_distrobox_exists
 
   local wrapper_path="$SCRIPT_DIR/torch-wrapper"
-  local -a cmd=(bash "$wrapper_path" --run --backend distrobox --distrobox-name "$DISTROBOX_NAME" --distrobox-image "$DISTROBOX_IMAGE" --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --instances-dir "$INSTANCES_DIR")
+  local -a cmd=("$wrapper_path" --inside-distrobox --run --backend distrobox --distrobox-name "$DISTROBOX_NAME" --distrobox-image "$DISTROBOX_IMAGE" --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --instances-dir "$INSTANCES_DIR")
   if [ "$INSTALL_NEW" -eq 1 ]; then
     cmd+=(--install-new)
   fi
@@ -217,7 +193,7 @@ reexec_inside_distrobox_if_needed() {
   fi
 
   log "Entering Distrobox container '$DISTROBOX_NAME' and continuing execution there."
-  if ! exec distrobox-enter --name "$DISTROBOX_NAME" --headless -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"; then
+  if ! exec distrobox-enter --name "$DISTROBOX_NAME" --headless -- bash "${cmd[@]}"; then
     err "Failed to re-enter wrapper inside Distrobox container '$DISTROBOX_NAME'. Verify that '$wrapper_path' is mounted and readable in the container."
   fi
 }
@@ -786,6 +762,10 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--torch-exe requires a path"
       TORCH_EXE="$1"
+      shift
+      ;;
+    --inside-distrobox)
+      IN_DISTROBOX_MARKER=1
       shift
       ;;
     -h|--help)
