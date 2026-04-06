@@ -12,7 +12,7 @@ DATA_DIR_DEFAULT="${XDG_DATA_HOME:-$HOME/.local/share}/$APP_NAME"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 DISTROBOX_NAME_DEFAULT="torch-wrapper"
-DISTROBOX_IMAGE_DEFAULT="docker.io/library/ubuntu:24.04"
+DISTROBOX_IMAGE_DEFAULT="docker.io/library/debian:stable-slim"
 BACKEND_SET_BY_ARG=0
 
 usage() {
