@@ -74,22 +74,10 @@ distrobox_exists() {
 }
 
 required_distrobox_mount_paths() {
-  local -A seen=()
-  local -a paths=()
-  local path
-  for path in \
-    "$SCRIPT_DIR" \
-    "${TORCH_DIR%/}" \
-    "${INSTANCES_DIR%/}" \
-    "$(dirname "$TORCH_ZIP_PATH")" \
-    "${WINEPREFIX%/}"; do
-    [ -n "$path" ] || continue
-    if [ -z "${seen[$path]+x}" ]; then
-      seen["$path"]=1
-      paths+=("$path")
-    fi
-  done
-  printf '%s\n' "${paths[@]}"
+  local instances_dir="${INSTANCES_DIR%/}"
+  [ -n "$instances_dir" ] || return
+  mkdir -p "$instances_dir"
+  (cd "$instances_dir" && pwd -P)
 }
 
 verify_distrobox_mount_paths() {
@@ -133,13 +121,19 @@ ensure_distrobox_exists() {
     volume_paths+=("$path")
   done < <(required_distrobox_mount_paths)
 
-  local -a volume_args=()
+  local -a volume_specs=()
   for path in "${volume_paths[@]}"; do
     mkdir -p "$path"
-    volume_args+=(--volume "$path:$path:rw")
+    path="$(cd "$path" && pwd -P)"
+    volume_specs+=("$path:$path:rw")
   done
 
-  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --volume "${volume_args[@]}"
+  local -a create_cmd=(distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --home "$SCRIPT_DIR")
+  for path in "${volume_specs[@]}"; do
+    create_cmd+=(--volume "$path")
+  done
+
+  "${create_cmd[@]}"
   if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
     err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
   fi
