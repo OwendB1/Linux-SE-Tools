@@ -203,14 +203,19 @@ reexec_inside_distrobox_if_needed() {
 
   ensure_distrobox_exists
 
-  local -a cmd=("$SCRIPT_DIR/torch-wrapper")
-  local arg
-  for arg in "${ORIGINAL_ARGS[@]}"; do
-    cmd+=("$arg")
-  done
+  local -a cmd=("$SCRIPT_DIR/torch-wrapper" --run --backend distrobox --distrobox-name "$DISTROBOX_NAME" --distrobox-image "$DISTROBOX_IMAGE" --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --instances-dir "$INSTANCES_DIR")
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    cmd+=(--install-new)
+  fi
+  if [ -n "${TORCH_EXE:-}" ]; then
+    cmd+=(--torch-exe "$TORCH_EXE")
+  fi
+  if [ "${#TORCH_ARGS[@]}" -gt 0 ]; then
+    cmd+=(-- "${TORCH_ARGS[@]}")
+  fi
 
   log "Entering Distrobox container '$DISTROBOX_NAME' and continuing execution there."
-  distrobox enter "$DISTROBOX_NAME" -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"
+  exec distrobox enter "$DISTROBOX_NAME" -- env TORCH_WRAPPER_INSIDE_DISTROBOX=1 "${cmd[@]}"
 }
 
 ensure_distrobox_dependencies() {
