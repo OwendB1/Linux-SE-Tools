@@ -4,6 +4,7 @@ set -euo pipefail
 
 APP_NAME="linux-torch-wrapper"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAUNCH_CWD="$(pwd -P)"
 TORCH_DIR="$SCRIPT_DIR/torch"
 INSTANCES_DIR="$SCRIPT_DIR/instances"
 TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
@@ -73,41 +74,6 @@ distrobox_exists() {
   distrobox list --no-color 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fixq -- "$DISTROBOX_NAME"
 }
 
-required_distrobox_mount_paths() {
-  local -A seen=()
-  local -a paths=()
-  local path
-  for path in \
-    "$SCRIPT_DIR" \
-    "${TORCH_DIR%/}" \
-    "${INSTANCES_DIR%/}" \
-    "$(dirname "$TORCH_ZIP_PATH")" \
-    "${WINEPREFIX%/}"; do
-    [ -n "$path" ] || continue
-    if [ -z "${seen[$path]+x}" ]; then
-      seen["$path"]=1
-      paths+=("$path")
-    fi
-  done
-  printf '%s\n' "${paths[@]}"
-}
-
-verify_distrobox_mount_paths() {
-  local path probe probe_q
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    mkdir -p "$path"
-    probe="$path/.torch-wrapper-mount-check.$$"
-    : > "$probe"
-    probe_q="$(printf '%q' "$probe")"
-    if ! run_distrobox "[ -f $probe_q ]"; then
-      rm -f "$probe"
-      err "Distrobox container '$DISTROBOX_NAME' is missing required mount path: $path. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
-    fi
-    rm -f "$probe"
-  done < <(required_distrobox_mount_paths)
-}
-
 ensure_distrobox_exists() {
   if [ "$IN_DISTROBOX_MARKER" = "1" ]; then
     return
@@ -121,29 +87,16 @@ ensure_distrobox_exists() {
     if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
       err "Unable to enter existing Distrobox container '$DISTROBOX_NAME'. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
     fi
-    verify_distrobox_mount_paths
     return
   fi
 
   log "Creating Distrobox container: $DISTROBOX_NAME (image: $DISTROBOX_IMAGE)"
-  local -a volume_paths=()
-  local path
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    volume_paths+=("$path")
-  done < <(required_distrobox_mount_paths)
+  local -a create_cmd=(distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --home "$LAUNCH_CWD")
 
-  local -a volume_args=()
-  for path in "${volume_paths[@]}"; do
-    mkdir -p "$path"
-    volume_args+=(--volume "$path:$path:rw")
-  done
-
-  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --volume "${volume_args[@]}"
+  "${create_cmd[@]}"
   if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
     err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
   fi
-  verify_distrobox_mount_paths
 }
 
 prompt_backend_selection() {
