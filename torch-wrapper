@@ -13,6 +13,7 @@ WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 DISTROBOX_NAME_DEFAULT="torch-wrapper"
 DISTROBOX_IMAGE_DEFAULT="docker.io/library/ubuntu:24.04"
+BACKEND_SET_BY_ARG=0
 
 usage() {
   cat <<USAGE
@@ -71,17 +72,108 @@ distrobox_exists() {
   distrobox list --no-color 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fixq -- "$DISTROBOX_NAME"
 }
 
+required_distrobox_mount_paths() {
+  local -A seen=()
+  local -a paths=()
+  local path
+  for path in \
+    "$SCRIPT_DIR" \
+    "${TORCH_DIR%/}" \
+    "${INSTANCES_DIR%/}" \
+    "$(dirname "$TORCH_ZIP_PATH")" \
+    "${WINEPREFIX%/}"; do
+    [ -n "$path" ] || continue
+    if [ -z "${seen[$path]+x}" ]; then
+      seen["$path"]=1
+      paths+=("$path")
+    fi
+  done
+  printf '%s\n' "${paths[@]}"
+}
+
+verify_distrobox_mount_paths() {
+  local path probe probe_q
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    mkdir -p "$path"
+    probe="$path/.torch-wrapper-mount-check.$$"
+    : > "$probe"
+    probe_q="$(printf '%q' "$probe")"
+    if ! run_distrobox "[ -f $probe_q ]"; then
+      rm -f "$probe"
+      err "Distrobox container '$DISTROBOX_NAME' is missing required mount path: $path. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
+    fi
+    rm -f "$probe"
+  done < <(required_distrobox_mount_paths)
+}
+
 ensure_distrobox_exists() {
   have distrobox || err "Distrobox backend requested but 'distrobox' was not found. Install distrobox and rerun."
 
   if distrobox_exists; then
     log "Using existing Distrobox container: $DISTROBOX_NAME"
+    verify_distrobox_mount_paths
     return
   fi
 
   log "Creating Distrobox container: $DISTROBOX_NAME (image: $DISTROBOX_IMAGE)"
-  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" \
-    --volume "$SCRIPT_DIR:$SCRIPT_DIR:rw"
+  local -a volume_paths=()
+  local path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    volume_paths+=("$path")
+  done < <(required_distrobox_mount_paths)
+
+  local -a volume_args=()
+  for path in "${volume_paths[@]}"; do
+    mkdir -p "$path"
+    volume_args+=(--volume "$path:$path:rw")
+  done
+
+  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" "${volume_args[@]}"
+  verify_distrobox_mount_paths
+}
+
+prompt_backend_selection() {
+  if [ "$BACKEND_SET_BY_ARG" -eq 1 ] && [ "$BACKEND" != "auto" ]; then
+    return
+  fi
+
+  if [ "$BACKEND" != "auto" ]; then
+    return
+  fi
+
+  if is_ostree_system; then
+    BACKEND="distrobox"
+    log "Detected immutable rpm-ostree system. Defaulting backend to Distrobox."
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Select installation mode:"
+    printf '  1) Install dependencies and run directly on host system (Wine)\n' >&2
+    printf '  2) Install and run fully inside Distrobox container\n' >&2
+
+    local choice
+    while true; do
+      printf 'Enter selection [1-2] (default: 2): ' >&2
+      IFS= read -r choice || break
+      case "${choice:-2}" in
+        1)
+          BACKEND="wine"
+          return
+          ;;
+        2)
+          BACKEND="distrobox"
+          return
+          ;;
+      esac
+      printf 'Invalid selection. Please enter 1 or 2.\n' >&2
+    done
+  fi
+
+  BACKEND="wine"
+  log "Non-interactive mode: defaulting backend to direct host Wine."
 }
 
 run_distrobox() {
@@ -514,11 +606,18 @@ download_torch() {
   local target_dir="$1"
 
   log "Downloading latest Torch build from $TORCH_ZIP_URL"
-  rm -f "$TORCH_ZIP_PATH"
-  curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
-
-  mkdir -p "$target_dir"
-  unzip -oq "$TORCH_ZIP_PATH" -d "$target_dir"
+  if [ "$BACKEND" = "distrobox" ]; then
+    local zip_q target_q url_q
+    zip_q="$(printf '%q' "$TORCH_ZIP_PATH")"
+    target_q="$(printf '%q' "$target_dir")"
+    url_q="$(printf '%q' "$TORCH_ZIP_URL")"
+    run_distrobox "rm -f $zip_q; curl -fL --retry 3 --retry-delay 2 -o $zip_q $url_q; mkdir -p $target_q; unzip -oq $zip_q -d $target_q"
+  else
+    rm -f "$TORCH_ZIP_PATH"
+    curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
+    mkdir -p "$target_dir"
+    unzip -oq "$TORCH_ZIP_PATH" -d "$target_dir"
+  fi
   log "Torch extracted to $target_dir"
 }
 
@@ -606,6 +705,9 @@ while [ "$#" -gt 0 ]; do
         auto|wine|distrobox) BACKEND="$1" ;;
         *) err "Invalid --backend value: $1 (expected auto|wine|distrobox)" ;;
       esac
+      if [ "$BACKEND" != "auto" ]; then
+        BACKEND_SET_BY_ARG=1
+      fi
       shift
       ;;
     --distrobox-name)
@@ -664,16 +766,13 @@ if [ "$RUN" -ne 1 ]; then
   exit 1
 fi
 
+prompt_backend_selection
 if [ "$BACKEND" = "auto" ]; then
-  if is_ostree_system; then
-    BACKEND="distrobox"
-  else
-    BACKEND="wine"
-  fi
+  BACKEND="distrobox"
 fi
 
-ensure_linux_dependencies
 ensure_torch_storage_writable
+ensure_linux_dependencies
 download_torch_if_needed
 if [ "$BACKEND" = "distrobox" ]; then
   run_torch_with_distrobox "${TORCH_ARGS[@]}"
