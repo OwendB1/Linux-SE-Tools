@@ -45,7 +45,7 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Compatibility
 
 - On immutable rpm-ostree distros (including Bazzite), the wrapper now uses Distrobox automatically.
-- Distrobox mode creates a container (default name `torch-wrapper`) and programmatically enters it before continuing execution, so you do not need to manually run `distrobox enter` first.
+- Distrobox mode creates a container (default name `torch-wrapper`) and programmatically enters it before continuing execution, so you do not need to manually run `distrobox-enter` first.
 - After entering the container, setup/install/run steps continue there automatically, including dependency bootstrap and Torch launch.
 - A host launcher shim is written to `~/.local/bin/torch-distrobox` so the containerized run path is linked back to the host.
 
