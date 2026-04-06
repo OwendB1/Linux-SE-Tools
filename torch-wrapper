@@ -85,6 +85,10 @@ is_immutable_os() {
     return 0
   fi
 
+  if [ -f /run/.containerenv ]; then
+    return 1
+  fi
+
   if have rpm-ostree; then
     return 0
   fi
@@ -94,7 +98,17 @@ is_immutable_os() {
   fi
 
   if [ -r /etc/os-release ]; then
-    if grep -Eiq '(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|immutable)' /etc/os-release; then
+    if grep -Eiq '(^|=)(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|atomic|immutable|ostree|bootc|bazzite|bluefin|aurora|ublue|ucore)($|[^a-z])' /etc/os-release; then
+      return 0
+    fi
+
+    # Handle distros that only expose immutable hints in specific os-release keys.
+    local os_release_tokens
+    os_release_tokens="$(
+      sed -nE 's/^(ID|ID_LIKE|VARIANT|VARIANT_ID)=["'\'']?([^"'\'']+)["'\'']?/\2/p' /etc/os-release \
+      | tr '[:upper:]' '[:lower:]'
+    )"
+    if printf '%s\n' "$os_release_tokens" | grep -Eq '(atomic|immutable|ostree|bootc|silverblue|kinoite|sericea|onyx|coreos|microos|aeon|bazzite|bluefin|aurora|ublue|ucore)'; then
       return 0
     fi
   fi
