@@ -283,7 +283,7 @@ ensure_winetricks_dependencies() {
   fi
 
   log "Bootstrapping Winetricks dependencies in $WINEPREFIX"
-  winetricks -q corefonts vcrun2022 dotnet48
+  winetricks --unattended -q corefonts vcrun2022 dotnet48
   touch "$marker"
 }
 
@@ -318,7 +318,7 @@ export WINEARCH=win64
 mkdir -p \"\$WINEPREFIX\"
 
 if [ ! -f \"$marker\" ]; then
-  winetricks -q corefonts vcrun2022 dotnet48
+  winetricks --unattended -q corefonts vcrun2022 dotnet48
   touch \"$marker\"
 fi
 
