@@ -118,7 +118,7 @@ ensure_distrobox_exists() {
 
   if distrobox_exists; then
     log "Using existing Distrobox container: $DISTROBOX_NAME"
-    if ! distrobox-enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
+    if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
       err "Unable to enter existing Distrobox container '$DISTROBOX_NAME'. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
     fi
     verify_distrobox_mount_paths
@@ -139,8 +139,8 @@ ensure_distrobox_exists() {
     volume_args+=(--volume "$path:$path:rw")
   done
 
-  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" "${volume_args[@]}"
-  if ! distrobox-enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
+  distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" --volume "${volume_args[@]}"
+  if ! distrobox-enter --name "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
     err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
   fi
   verify_distrobox_mount_paths
