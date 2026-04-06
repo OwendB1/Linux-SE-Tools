@@ -112,6 +112,9 @@ ensure_distrobox_exists() {
 
   if distrobox_exists; then
     log "Using existing Distrobox container: $DISTROBOX_NAME"
+    if ! distrobox enter "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
+      err "Unable to enter existing Distrobox container '$DISTROBOX_NAME'. Recreate it (e.g. 'distrobox rm $DISTROBOX_NAME') and rerun."
+    fi
     verify_distrobox_mount_paths
     return
   fi
@@ -131,6 +134,9 @@ ensure_distrobox_exists() {
   done
 
   distrobox create --yes --name "$DISTROBOX_NAME" --image "$DISTROBOX_IMAGE" "${volume_args[@]}"
+  if ! distrobox enter "$DISTROBOX_NAME" -- true >/dev/null 2>&1; then
+    err "Created Distrobox container '$DISTROBOX_NAME' but failed to enter it. Check your Distrobox/Podman setup and rerun."
+  fi
   verify_distrobox_mount_paths
 }
 
@@ -283,7 +289,7 @@ ensure_winetricks_dependencies() {
   fi
 
   log "Bootstrapping Winetricks dependencies in $WINEPREFIX"
-  winetricks --unattended -q corefonts vcrun2022 dotnet48
+  winetricks -q corefonts vcrun2022 dotnet48
   touch "$marker"
 }
 
@@ -318,7 +324,7 @@ export WINEARCH=win64
 mkdir -p \"\$WINEPREFIX\"
 
 if [ ! -f \"$marker\" ]; then
-  winetricks --unattended -q corefonts vcrun2022 dotnet48
+  winetricks -q corefonts vcrun2022 dotnet48
   touch \"$marker\"
 fi
 
