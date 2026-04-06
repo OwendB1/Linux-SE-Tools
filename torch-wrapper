@@ -97,16 +97,24 @@ is_immutable_os() {
     return 0
   fi
 
+  local os_release_file=""
   if [ -r /etc/os-release ]; then
-    if grep -Eiq '(^|=)(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|atomic|immutable|ostree|bootc|bazzite|bluefin|aurora|ublue|ucore)($|[^a-z])' /etc/os-release; then
+    os_release_file="/etc/os-release"
+  elif [ -r /usr/lib/os-release ]; then
+    os_release_file="/usr/lib/os-release"
+  fi
+
+  if [ -n "$os_release_file" ]; then
+    if grep -Eiq '(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|atomic|immutable|ostree|bootc|bazzite|bluefin|aurora|ublue|ucore)' "$os_release_file"; then
       return 0
     fi
 
-    # Handle distros that only expose immutable hints in specific os-release keys.
+    # Handle distros that expose immutable hints only in specific os-release keys.
     local os_release_tokens
     os_release_tokens="$(
-      sed -nE 's/^(ID|ID_LIKE|VARIANT|VARIANT_ID)=["'\'']?([^"'\'']+)["'\'']?/\2/p' /etc/os-release \
-      | tr '[:upper:]' '[:lower:]'
+      sed -nE 's/^(ID|ID_LIKE|VARIANT|VARIANT_ID|IMAGE_ID|NAME|PRETTY_NAME)=["'\'']?([^"'\'']+)["'\'']?/\2/p' "$os_release_file" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr ' -' '\n'
     )"
     if printf '%s\n' "$os_release_tokens" | grep -Eq '(atomic|immutable|ostree|bootc|silverblue|kinoite|sericea|onyx|coreos|microos|aeon|bazzite|bluefin|aurora|ublue|ucore)'; then
       return 0
