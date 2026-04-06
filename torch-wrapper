@@ -8,13 +8,16 @@ TORCH_DIR="$SCRIPT_DIR/torch"
 TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
 TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
+BACKEND_DEFAULT="auto"
+DISTROBOX_NAME_DEFAULT="linux-torch-wrapper"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
+  --backend <mode>       Runtime backend: auto (default), wine, distrobox.
   --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
@@ -75,6 +78,64 @@ install_linux_dependencies() {
       err "Unsupported package manager. Install wine, winetricks, curl, unzip, cabextract manually."
       ;;
   esac
+}
+
+is_immutable_os() {
+  if [ -f /run/ostree-booted ]; then
+    return 0
+  fi
+
+  if have rpm-ostree; then
+    return 0
+  fi
+
+  if have transactional-update; then
+    return 0
+  fi
+
+  if [ -r /etc/os-release ]; then
+    if grep -Eiq '(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|immutable)' /etc/os-release; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+select_backend_for_auto() {
+  if is_immutable_os; then
+    log "Detected immutable OS; defaulting backend to distrobox."
+    printf 'distrobox\n'
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Choose runtime backend:"
+    printf '  1) wine (run directly on the current system)\n' >&2
+    printf '  2) distrobox (run inside a distrobox container)\n' >&2
+
+    local choice
+    while true; do
+      printf 'Select backend [1-2, default 1]: ' >&2
+      IFS= read -r choice || break
+      case "$choice" in
+        ""|1|wine)
+          printf 'wine\n'
+          return
+          ;;
+        2|distrobox)
+          printf 'distrobox\n'
+          return
+          ;;
+        *)
+          printf 'Invalid selection. Enter 1 or 2.\n' >&2
+          ;;
+      esac
+    done
+  fi
+
+  log "Non-interactive auto mode; defaulting backend to wine."
+  printf 'wine\n'
 }
 
 ensure_linux_dependencies() {
@@ -246,11 +307,27 @@ run_torch() {
   wine "$exe" "$@"
 }
 
+run_inside_distrobox() {
+  local -a forward_args=("$@")
+  local distrobox_name="${DISTROBOX_NAME:-$DISTROBOX_NAME_DEFAULT}"
+  local launch_cwd="${LAUNCH_CWD:-$PWD}"
+
+  have distrobox || err "distrobox backend selected but 'distrobox' is not installed."
+  have distrobox-enter || err "distrobox backend selected but 'distrobox-enter' is not installed."
+
+  log "Preparing distrobox container '$distrobox_name' with home '$launch_cwd'"
+  distrobox create --yes --name "$distrobox_name" --home "$launch_cwd"
+
+  log "Entering distrobox '$distrobox_name' and reinvoking wrapper"
+  distrobox-enter --name "$distrobox_name" -- "$0" "${forward_args[@]}"
+}
+
 RUN=0
 INSTALL_NEW=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
+BACKEND="$BACKEND_DEFAULT"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -260,6 +337,12 @@ while [ "$#" -gt 0 ]; do
       ;;
     --install-new)
       INSTALL_NEW=1
+      shift
+      ;;
+    --backend)
+      shift
+      [ "$#" -gt 0 ] || err "--backend requires one of: auto, wine, distrobox"
+      BACKEND="$1"
       shift
       ;;
     --wineprefix)
@@ -298,6 +381,33 @@ done
 if [ "$RUN" -ne 1 ]; then
   usage
   exit 1
+fi
+
+case "$BACKEND" in
+  auto|wine|distrobox)
+    ;;
+  *)
+    err "Invalid --backend '$BACKEND'. Valid values: auto, wine, distrobox"
+    ;;
+esac
+
+if [ "$BACKEND" = "auto" ]; then
+  BACKEND="$(select_backend_for_auto)"
+fi
+
+if [ "$BACKEND" = "distrobox" ]; then
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR")
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    RERUN_ARGS+=(--install-new)
+  fi
+  if [ -n "$TORCH_EXE" ]; then
+    RERUN_ARGS+=(--torch-exe "$TORCH_EXE")
+  fi
+  if [ "${#TORCH_ARGS[@]}" -gt 0 ]; then
+    RERUN_ARGS+=(-- "${TORCH_ARGS[@]}")
+  fi
+  run_inside_distrobox "${RERUN_ARGS[@]}"
+  exit 0
 fi
 
 ensure_linux_dependencies
