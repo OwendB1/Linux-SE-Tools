@@ -35,7 +35,7 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 - `--install-new`: force installation into a newly prompted folder under `./instances` (default folder name: `torch-<timestamp>`).
 - `--backend <auto|wine|distrobox>`: choose runtime backend. `auto` uses Distrobox on immutable rpm-ostree systems, otherwise Wine.
 - `--distrobox-name <name>`: Distrobox container name used with `--backend distrobox` (default: `torch-wrapper`).
-- `--distrobox-image <image>`: container image used for first-time Distrobox creation (default: `docker.io/library/debian:stable-slim`).
+- `--distrobox-image <image>`: container image used for first-time Distrobox creation (default: `docker.io/library/ubuntu:24.04`).
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override Torch root used for direct executable discovery (default: `./torch` beside the wrapper).
 - `--instances-dir <path>`: override instance directory (default: `./instances` beside the wrapper).
@@ -45,7 +45,7 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Compatibility
 
 - On immutable rpm-ostree distros (including Bazzite), the wrapper now uses Distrobox automatically.
-- Distrobox mode creates a container (default name `torch-wrapper`), auto-enters it for all containerized setup/run steps, installs Torch dependencies inside it, and launches Torch from the host paths.
+- Distrobox mode creates a container (default name `torch-wrapper`), installs Torch dependencies inside it, and launches Torch from the host paths.
 - A host launcher shim is written to `~/.local/bin/torch-distrobox` so the containerized run path is linked back to the host.
 
 ## License
