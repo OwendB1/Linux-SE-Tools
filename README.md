@@ -17,7 +17,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
    into the script directory.
 4. Ensure `./instances` exists, then let you choose an existing instance folder or create a new one.
 5. For new installs, prompt for an instance folder name (default: `torch-<timestamp>` when Enter is pressed), then extract Torch there.
-6. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
+6. Bootstrap the Wine prefix with Winetricks dependencies using `--unattended` (once per prefix).
 7. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
 8. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
 9. Launch Torch executable via host Wine or Distrobox container.
