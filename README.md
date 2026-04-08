@@ -13,7 +13,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 1. Resolve runtime backend based on `--backend`:
    - `auto` (default): interactive prompt on mutable systems to choose `wine` vs `distrobox`; defaults to `distrobox` on immutable systems.
    - `wine`: run directly on host.
-   - `distrobox`: create/enter distrobox, then reinvoke wrapper with `--backend wine`.
+   - `distrobox`: create/enter distrobox, reinvoke wrapper with `--backend wine`, and harden Wine launch with `WINEDLLOVERRIDES=dxgi,d3d11=disabled` (preserving existing overrides).
 2. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
 3. Download the latest Torch build from:
    `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
