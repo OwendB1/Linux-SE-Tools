@@ -389,10 +389,10 @@ run_inside_distrobox() {
   have distrobox-enter || err "distrobox backend selected but 'distrobox-enter' is not installed."
 
   log "Preparing distrobox container '$distrobox_name' with home '$launch_cwd'"
-  distrobox create --yes --name "$distrobox_name" --home "$launch_cwd" --nvidia
+  distrobox create --yes --name "$distrobox_name" --image quay.io/toolbx/ubuntu-toolbox:latest --home "$launch_cwd"
 
   log "Entering distrobox '$distrobox_name' and reinvoking wrapper"
-  distrobox-enter --name "$distrobox_name" -r -- "$0" "${forward_args[@]}"
+  distrobox-enter --name "$distrobox_name" -- "$0" "${forward_args[@]}"
 }
 
 RUN=0
