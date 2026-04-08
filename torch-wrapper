@@ -260,14 +260,34 @@ ensure_wine_windows_version() {
   wine reg add "HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe" /v Version /t REG_SZ /d win10 /f >/dev/null
 }
 
-ensure_wine_graphics_compatibility() {
+configure_wine_graphics_mode() {
+  local mode="$1"
+
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
 
-  # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
-  # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
-  log "Applying Wine graphics compatibility fix (Direct3D renderer = gdi)"
-  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+  case "$mode" in
+    gdi)
+      # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
+      # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
+      # Also disable DXGI/D3D11 to avoid Vulkan swapchain failures in some containerized setups.
+      log "Applying Wine graphics compatibility mode: gdi"
+      wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+      wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v dxgi /t REG_SZ /d disabled /f >/dev/null
+      wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v d3d11 /t REG_SZ /d disabled /f >/dev/null
+      ;;
+    off)
+      # The compatibility mode is persisted in the same prefix, so explicitly remove any
+      # overrides when users switch it off; otherwise "off" appears to have no effect.
+      log "Applying Wine graphics compatibility mode: off"
+      wine reg delete "HKCU\\Software\\Wine\\Direct3D" /v renderer /f >/dev/null 2>&1 || true
+      wine reg delete "HKCU\\Software\\Wine\\DllOverrides" /v dxgi /f >/dev/null 2>&1 || true
+      wine reg delete "HKCU\\Software\\Wine\\DllOverrides" /v d3d11 /f >/dev/null 2>&1 || true
+      ;;
+    *)
+      err "Unsupported wine graphics mode: $mode"
+      ;;
+  esac
 }
 
 resolve_torch_exe_optional() {
@@ -523,7 +543,5 @@ ensure_linux_dependencies
 download_torch_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
-if [ "$WINE_GRAPHICS" = "gdi" ]; then
-  ensure_wine_graphics_compatibility
-fi
+configure_wine_graphics_mode "$WINE_GRAPHICS"
 run_torch "${TORCH_ARGS[@]}"
