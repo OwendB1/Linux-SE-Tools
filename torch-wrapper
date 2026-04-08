@@ -223,6 +223,9 @@ ensure_linux_dependencies() {
   done
 
   if [ "$missing" -eq 1 ]; then
+    if is_immutable_os; then
+      err "Missing Linux dependencies on an immutable OS. Use --backend distrobox to run Torch in a container."
+    fi
     install_linux_dependencies "$(detect_pm)"
   else
     log "Linux dependencies already installed."
@@ -477,6 +480,11 @@ fi
 
 if [ "$BACKEND" = "auto" ]; then
   BACKEND="$(select_backend_for_auto)"
+fi
+
+if [ "$BACKEND_SET" -eq 0 ] && [ "$BACKEND" = "wine" ] && is_immutable_os && have distrobox && have distrobox-enter; then
+  log "Immutable OS detected with distrobox available; switching backend to distrobox to avoid host package installation."
+  BACKEND="distrobox"
 fi
 
 if [ "$BACKEND" = "distrobox" ]; then
