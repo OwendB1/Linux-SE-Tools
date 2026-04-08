@@ -230,7 +230,6 @@ ensure_linux_dependencies() {
 
 ensure_winetricks_dependencies() {
   export WINEPREFIX="$WINEPREFIX"
-  export WINEARCH=win64
   mkdir -p "$WINEPREFIX"
 
   local marker="$WINEPREFIX/.torch-wrapper-winetricks-done"
@@ -238,6 +237,9 @@ ensure_winetricks_dependencies() {
     log "Winetricks bootstrap already completed for this prefix."
     return
   fi
+
+  log "Initializing Wine prefix"
+  wineboot -u
 
   log "Bootstrapping Winetricks dependencies in $WINEPREFIX"
   winetricks -q corefonts vcrun2022 dotnet48
