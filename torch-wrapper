@@ -110,8 +110,9 @@ install_linux_dependencies() {
   log "Installing dependencies with $pm"
   case "$pm" in
     apt)
+      run_privileged dpkg --add-architecture i386
       run_privileged apt-get update
-      run_privileged apt-get install -y wine winetricks curl unzip cabextract
+      run_privileged apt-get install -y wine64 wine32 winetricks curl unzip cabextract
       ;;
     dnf)
       run_privileged dnf install -y wine winetricks curl unzip cabextract
