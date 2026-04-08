@@ -10,24 +10,21 @@ TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 DISTROBOX_NAME_DEFAULT="linux-torch-wrapper"
-DISTROBOX_WINE_DLLOVERRIDES_DEFAULT="dxgi,d3d11=disabled"
-WINE_GRAPHICS_DEFAULT="off"
 PERSISTED_CONFIG_PATH="$SCRIPT_DIR/.torch-wrapper.conf"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--wine-graphics <off|gdi>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
   --backend <mode>       Runtime backend: auto (default), wine, distrobox.
+                         Values set via --backend are persisted in
+                         $PERSISTED_CONFIG_PATH for future runs.
   --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
-  --wine-graphics <mode> Wine graphics compatibility mode: off (default), gdi.
-                         Values set via --backend/--wine-graphics are persisted in
-                         $PERSISTED_CONFIG_PATH for future runs.
   -h, --help             Show help.
 
 Examples:
@@ -64,11 +61,6 @@ load_persisted_settings() {
       BACKEND)
         case "$value" in
           auto|wine|distrobox) BACKEND="$value" ;;
-        esac
-        ;;
-      WINE_GRAPHICS)
-        case "$value" in
-          off|gdi) WINE_GRAPHICS="$value" ;;
         esac
         ;;
     esac
@@ -261,34 +253,14 @@ ensure_wine_windows_version() {
   wine reg add "HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe" /v Version /t REG_SZ /d win10 /f >/dev/null
 }
 
-configure_wine_graphics_mode() {
-  local mode="$1"
-
+apply_wine_gdi_patch() {
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
 
-  case "$mode" in
-    gdi)
-      # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
-      # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
-      # Also disable DXGI/D3D11 to avoid Vulkan swapchain failures in some containerized setups.
-      log "Applying Wine graphics compatibility mode: gdi"
-      wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
-      wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v dxgi /t REG_SZ /d disabled /f >/dev/null
-      wine reg add "HKCU\\Software\\Wine\\DllOverrides" /v d3d11 /t REG_SZ /d disabled /f >/dev/null
-      ;;
-    off)
-      # The compatibility mode is persisted in the same prefix, so explicitly remove any
-      # overrides when users switch it off; otherwise "off" appears to have no effect.
-      log "Applying Wine graphics compatibility mode: off"
-      wine reg delete "HKCU\\Software\\Wine\\Direct3D" /v renderer /f >/dev/null 2>&1 || true
-      wine reg delete "HKCU\\Software\\Wine\\DllOverrides" /v dxgi /f >/dev/null 2>&1 || true
-      wine reg delete "HKCU\\Software\\Wine\\DllOverrides" /v d3d11 /f >/dev/null 2>&1 || true
-      ;;
-    *)
-      err "Unsupported wine graphics mode: $mode"
-      ;;
-  esac
+  # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
+  # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
+  log "Applying Wine graphics patch: Direct3D renderer = gdi"
+  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
 }
 
 resolve_torch_exe_optional() {
@@ -412,11 +384,6 @@ run_inside_distrobox() {
   local -a forward_args=("$@")
   local distrobox_name="${DISTROBOX_NAME:-$DISTROBOX_NAME_DEFAULT}"
   local launch_cwd="${LAUNCH_CWD:-$PWD}"
-  local wine_dll_overrides="$DISTROBOX_WINE_DLLOVERRIDES_DEFAULT"
-
-  if [ -n "${WINEDLLOVERRIDES:-}" ]; then
-    wine_dll_overrides="${DISTROBOX_WINE_DLLOVERRIDES_DEFAULT};${WINEDLLOVERRIDES}"
-  fi
 
   have distrobox || err "distrobox backend selected but 'distrobox' is not installed."
   have distrobox-enter || err "distrobox backend selected but 'distrobox-enter' is not installed."
@@ -424,8 +391,8 @@ run_inside_distrobox() {
   log "Preparing distrobox container '$distrobox_name' with home '$launch_cwd'"
   distrobox create --yes --name "$distrobox_name" --home "$launch_cwd" --nvidia
 
-  log "Entering distrobox '$distrobox_name' and reinvoking wrapper with WINEDLLOVERRIDES=$wine_dll_overrides"
-  distrobox-enter --name "$distrobox_name" -r -- env WINEDLLOVERRIDES="$wine_dll_overrides" "$0" "${forward_args[@]}"
+  log "Entering distrobox '$distrobox_name' and reinvoking wrapper"
+  distrobox-enter --name "$distrobox_name" -r -- "$0" "${forward_args[@]}"
 }
 
 RUN=0
@@ -434,9 +401,7 @@ WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
 BACKEND="$BACKEND_DEFAULT"
-WINE_GRAPHICS="$WINE_GRAPHICS_DEFAULT"
 BACKEND_SET=0
-WINE_GRAPHICS_SET=0
 
 load_persisted_settings
 
@@ -475,13 +440,6 @@ while [ "$#" -gt 0 ]; do
       TORCH_EXE="$1"
       shift
       ;;
-    --wine-graphics)
-      shift
-      [ "$#" -gt 0 ] || err "--wine-graphics requires one of: off, gdi"
-      WINE_GRAPHICS="$1"
-      WINE_GRAPHICS_SET=1
-      shift
-      ;;
     -h|--help)
       usage
       exit 0
@@ -510,20 +468,8 @@ case "$BACKEND" in
     ;;
 esac
 
-case "$WINE_GRAPHICS" in
-  off|gdi)
-    ;;
-  *)
-    err "Invalid --wine-graphics '$WINE_GRAPHICS'. Valid values: off, gdi"
-    ;;
-esac
-
 if [ "$BACKEND_SET" -eq 1 ]; then
   persist_setting BACKEND "$BACKEND"
-fi
-
-if [ "$WINE_GRAPHICS_SET" -eq 1 ]; then
-  persist_setting WINE_GRAPHICS "$WINE_GRAPHICS"
 fi
 
 if [ "$BACKEND" = "auto" ]; then
@@ -531,7 +477,7 @@ if [ "$BACKEND" = "auto" ]; then
 fi
 
 if [ "$BACKEND" = "distrobox" ]; then
-  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --wine-graphics "$WINE_GRAPHICS")
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR")
   if [ "$INSTALL_NEW" -eq 1 ]; then
     RERUN_ARGS+=(--install-new)
   fi
@@ -549,5 +495,5 @@ ensure_linux_dependencies
 download_torch_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
-configure_wine_graphics_mode "$WINE_GRAPHICS"
+apply_wine_gdi_patch
 run_torch "${TORCH_ARGS[@]}"
