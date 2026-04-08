@@ -10,10 +10,12 @@ TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
 DISTROBOX_NAME_DEFAULT="linux-torch-wrapper"
+WINE_GRAPHICS_DEFAULT="off"
+PERSISTED_CONFIG_PATH="$SCRIPT_DIR/.torch-wrapper.conf"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--wine-graphics <off|gdi>] [-- <torch args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
@@ -22,6 +24,9 @@ Options:
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
   --torch-exe <path>     Explicit path to Torch executable.
+  --wine-graphics <mode> Wine graphics compatibility mode: off (default), gdi.
+                         Values set via --backend/--wine-graphics are persisted in
+                         $PERSISTED_CONFIG_PATH for future runs.
   -h, --help             Show help.
 
 Examples:
@@ -34,6 +39,59 @@ log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
 err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+load_persisted_settings() {
+  [ -f "$PERSISTED_CONFIG_PATH" ] || return 0
+
+  local line key value
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      \#*)
+        continue
+        ;;
+      *=*)
+        key="${line%%=*}"
+        value="${line#*=}"
+        ;;
+      *)
+        continue
+        ;;
+    esac
+
+    case "$key" in
+      BACKEND)
+        case "$value" in
+          auto|wine|distrobox) BACKEND="$value" ;;
+        esac
+        ;;
+      WINE_GRAPHICS)
+        case "$value" in
+          off|gdi) WINE_GRAPHICS="$value" ;;
+        esac
+        ;;
+    esac
+  done < "$PERSISTED_CONFIG_PATH"
+}
+
+persist_setting() {
+  local key="$1"
+  local value="$2"
+  local tmp_file
+  tmp_file="$(mktemp "${PERSISTED_CONFIG_PATH}.tmp.XXXXXX")"
+
+  {
+    printf '# Persisted torch-wrapper preferences\n'
+    printf '%s=%s\n' "$key" "$value"
+    if [ -f "$PERSISTED_CONFIG_PATH" ]; then
+      awk -F= -v key="$key" '
+        $1 != key && $1 != "" && substr($0, 1, 1) != "#" { print $0 }
+      ' "$PERSISTED_CONFIG_PATH"
+    fi
+  } > "$tmp_file"
+
+  mv "$tmp_file" "$PERSISTED_CONFIG_PATH"
+}
 
 run_privileged() {
   if [ "${EUID:-$(id -u)}" -eq 0 ]; then
@@ -350,6 +408,11 @@ WINEPREFIX="$WINEPREFIX_DEFAULT"
 TORCH_EXE=""
 TORCH_ARGS=()
 BACKEND="$BACKEND_DEFAULT"
+WINE_GRAPHICS="$WINE_GRAPHICS_DEFAULT"
+BACKEND_SET=0
+WINE_GRAPHICS_SET=0
+
+load_persisted_settings
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -365,6 +428,7 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--backend requires one of: auto, wine, distrobox"
       BACKEND="$1"
+      BACKEND_SET=1
       shift
       ;;
     --wineprefix)
@@ -383,6 +447,13 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--torch-exe requires a path"
       TORCH_EXE="$1"
+      shift
+      ;;
+    --wine-graphics)
+      shift
+      [ "$#" -gt 0 ] || err "--wine-graphics requires one of: off, gdi"
+      WINE_GRAPHICS="$1"
+      WINE_GRAPHICS_SET=1
       shift
       ;;
     -h|--help)
@@ -413,12 +484,28 @@ case "$BACKEND" in
     ;;
 esac
 
+case "$WINE_GRAPHICS" in
+  off|gdi)
+    ;;
+  *)
+    err "Invalid --wine-graphics '$WINE_GRAPHICS'. Valid values: off, gdi"
+    ;;
+esac
+
+if [ "$BACKEND_SET" -eq 1 ]; then
+  persist_setting BACKEND "$BACKEND"
+fi
+
+if [ "$WINE_GRAPHICS_SET" -eq 1 ]; then
+  persist_setting WINE_GRAPHICS "$WINE_GRAPHICS"
+fi
+
 if [ "$BACKEND" = "auto" ]; then
   BACKEND="$(select_backend_for_auto)"
 fi
 
 if [ "$BACKEND" = "distrobox" ]; then
-  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR")
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --wine-graphics "$WINE_GRAPHICS")
   if [ "$INSTALL_NEW" -eq 1 ]; then
     RERUN_ARGS+=(--install-new)
   fi
@@ -436,5 +523,7 @@ ensure_linux_dependencies
 download_torch_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
-ensure_wine_graphics_compatibility
+if [ "$WINE_GRAPHICS" = "gdi" ]; then
+  ensure_wine_graphics_compatibility
+fi
 run_torch "${TORCH_ARGS[@]}"

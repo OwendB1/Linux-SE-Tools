@@ -21,7 +21,7 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
 4. Extract Torch to `./torch` (relative to the script location).
 5. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
 6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-7. Apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) to avoid black context/dropdown menus.
+7. Optionally apply a Wine graphics compatibility tweak (`Direct3D\\renderer=gdi`) if `--wine-graphics gdi` is set.
 8. Launch Torch executable via Wine.
 
 If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
@@ -30,7 +30,7 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 ## Options
 
 ```bash
-./torch-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [--wine-graphics <off|gdi>] [-- <torch args>]
 ```
 
 - `--run`: required main action.
@@ -39,7 +39,11 @@ When multiple Torch executables are detected, `--run` prompts you to select whic
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
 - `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
 - `--torch-exe <path>`: explicitly point to an executable.
+- `--wine-graphics <off|gdi>`: opt into graphics workaround (default: `off`).
 - `-- <torch args>`: pass extra arguments directly to Torch.
+
+When `--backend` or `--wine-graphics` is provided, the selected value is saved to
+`./.torch-wrapper.conf` and reused on future runs unless overridden.
 
 ## Compatibility
 
