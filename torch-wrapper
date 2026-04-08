@@ -177,7 +177,7 @@ is_immutable_os() {
 
 select_backend_for_auto() {
   if is_immutable_os; then
-    log "Detected immutable OS; defaulting backend to distrobox."
+    printf '[%s] %s\n' "$APP_NAME" "Detected immutable OS; defaulting backend to distrobox." >&2
     printf 'distrobox\n'
     return
   fi
@@ -207,7 +207,7 @@ select_backend_for_auto() {
     done
   fi
 
-  log "Non-interactive auto mode; defaulting backend to wine."
+  printf '[%s] %s\n' "$APP_NAME" "Non-interactive auto mode; defaulting backend to wine." >&2
   printf 'wine\n'
 }
 
