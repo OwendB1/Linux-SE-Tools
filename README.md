@@ -1,52 +1,53 @@
 # Linux Torch Wrapper
 
-A thin wrapper that runs Torch through Wine and can fully bootstrap itself with a single command.
+This repo now provides two separate launchers that share the same Wine-prefix workflow:
 
-## One-command usage
+- `./torch-wrapper` for Torch
+- `./se-toolbox-wrapper` for SEToolbox
+
+Both scripts can install dependencies, download/extract the app, apply Wine compatibility settings (including the GDI renderer patch), and launch with Wine.
+
+## Torch launcher
 
 ```bash
 ./torch-wrapper --run
 ```
 
-`--run` will:
-
-1. Resolve runtime backend based on `--backend`:
-   - `auto` (default): interactive prompt on mutable systems to choose `wine` vs `distrobox`; defaults to `distrobox` on immutable systems.
-   - `wine`: run directly on host.
-   - `distrobox`: create/enter distrobox, then reinvoke wrapper with `--backend wine` inside the container.
-2. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
-3. Download the latest Torch build from:
-   `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
-   into the script directory.
-4. Extract Torch to `./torch` (relative to the script location).
-5. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
-6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-7. Apply the Wine graphics compatibility patch (`Direct3D\\renderer=gdi`).
-8. Launch Torch executable via Wine.
-
-If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
-When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.
-
-## Options
+Options:
 
 ```bash
 ./torch-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
 ```
 
-- `--run`: required main action.
-- `--backend <auto|wine|distrobox>`: choose execution backend (default: `auto`).
-- `--install-new`: force installation of a new Torch instance into `./torch/instances/torch-<timestamp>`.
-- `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
-- `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
-- `--torch-exe <path>`: explicitly point to an executable.
-- `-- <torch args>`: pass extra arguments directly to Torch.
+Default paths:
+- Wine prefix: `./.wine-torch`
+- Install dir: `./torch`
 
-When `--backend` is provided, the selected value is saved to
-`./.torch-wrapper.conf` and reused on future runs unless overridden.
+## SEToolbox launcher
 
-## Compatibility
+```bash
+./se-toolbox-wrapper --run
+```
 
-- `./torch-wrapper.sh` is kept as a compatibility shim and forwards to `./torch-wrapper`.
+Options:
+
+```bash
+./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [-- <setoolbox args>]
+```
+
+Default paths:
+- Wine prefix: `./.wine-torch` (shared with Torch by default)
+- Install dir: `./setoolbox`
+- Download URL: `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`
+
+## Compatibility behavior
+
+- Both launchers support `--backend auto|wine|distrobox`.
+- On immutable systems with distrobox available, auto mode prefers distrobox.
+- Both launchers apply:
+  - Winetricks bootstrap (`corefonts vcrun2022 dotnet48`)
+  - Windows version override to `win10`
+  - Graphics fix: `HKCU\\Software\\Wine\\Direct3D\\renderer=gdi`
 
 ## License
 
