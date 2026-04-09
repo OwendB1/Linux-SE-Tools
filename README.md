@@ -1,11 +1,11 @@
 # Linux Torch Wrapper
 
-A thin wrapper that runs Torch through Wine and can fully bootstrap itself with a single command.
+A thin wrapper that runs Torch and SEToolbox through Wine and can bootstrap either app with a single command.
 
 ## One-command usage
 
 ```bash
-./torch-wrapper --run
+./torch-se-wrapper --run
 ```
 
 `--run` will:
@@ -14,39 +14,42 @@ A thin wrapper that runs Torch through Wine and can fully bootstrap itself with 
    - `auto` (default): interactive prompt on mutable systems to choose `wine` vs `distrobox`; defaults to `distrobox` on immutable systems.
    - `wine`: run directly on host.
    - `distrobox`: create/enter distrobox, then reinvoke wrapper with `--backend wine` inside the container.
-2. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
-3. Download the latest Torch build from:
-   `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
-   into the script directory.
-4. Extract Torch to `./torch` (relative to the script location).
-5. Bootstrap the Wine prefix with Winetricks dependencies (once per prefix).
+2. Resolve app target based on `--app`:
+   - `auto` (default): detect existing binaries and select `torch` or `setoolbox`.
+   - `torch`: run Torch.
+   - `setoolbox`: run Space Engineers Toolbox.
+3. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
+4. Download and extract the selected app when no executable is found:
+   - Torch from `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
+   - SEToolbox from `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`
+5. Bootstrap Wine prefix dependencies (once per prefix).
 6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-7. Apply the Wine graphics compatibility patch (`Direct3D\\renderer=gdi`).
-8. Launch Torch executable via Wine.
+7. Apply the Wine graphics compatibility patch (`Direct3D\\renderer=gdi`) for both Torch and SEToolbox.
+8. Launch the selected executable via Wine.
 
-If Torch is already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
-When multiple Torch executables are detected, `--run` prompts you to select which instance to launch.
+If binaries are already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
+When multiple binaries are detected, `--run` prompts you to select which one to launch.
 
 ## Options
 
 ```bash
-./torch-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+./torch-se-wrapper --run [--app <auto|torch|setoolbox>] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--setoolbox-dir <path>] [--torch-exe <path>] [--setoolbox-exe <path>] [-- <app args>]
 ```
 
 - `--run`: required main action.
+- `--app <auto|torch|setoolbox>`: choose app target (default: `auto`).
 - `--backend <auto|wine|distrobox>`: choose execution backend (default: `auto`).
-- `--install-new`: force installation of a new Torch instance into `./torch/instances/torch-<timestamp>`.
+- `--install-new`: force installation of a new instance for the selected app.
 - `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
-- `--torch-dir <path>`: override install directory (default: `./torch` beside the wrapper).
-- `--torch-exe <path>`: explicitly point to an executable.
-- `-- <torch args>`: pass extra arguments directly to Torch.
-
-When `--backend` is provided, the selected value is saved to
-`./.torch-wrapper.conf` and reused on future runs unless overridden.
+- `--torch-dir <path>`: override Torch install directory (default: `./torch`).
+- `--setoolbox-dir <path>`: override SEToolbox install directory (default: `./setoolbox`).
+- `--torch-exe <path>`: explicitly point to a Torch executable.
+- `--setoolbox-exe <path>`: explicitly point to a SEToolbox executable.
+- `-- <app args>`: pass extra arguments directly to the selected app.
 
 ## Compatibility
 
-- `./torch-wrapper.sh` is kept as a compatibility shim and forwards to `./torch-wrapper`.
+- `./torch-wrapper` is kept as a compatibility shim and forwards to `./torch-se-wrapper`.
 
 ## License
 
