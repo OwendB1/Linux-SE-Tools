@@ -2,39 +2,31 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 
-APP_NAME="linux-torch-wrapper"
+APP_NAME="linux-se-toolbox-wrapper"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TORCH_DIR="$SCRIPT_DIR/torch"
-TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
-TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
 SETOOLBOX_DIR="$SCRIPT_DIR/setoolbox"
 SETOOLBOX_ZIP_URL="https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip"
 SETOOLBOX_ZIP_PATH="$SCRIPT_DIR/setoolbox.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
-APP_DEFAULT="auto"
-DISTROBOX_NAME_DEFAULT="linux-torch-wrapper"
+DISTROBOX_NAME_DEFAULT="linux-se-toolbox-wrapper"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--app <auto|torch|setoolbox>] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--setoolbox-dir <path>] [--torch-exe <path>] [--setoolbox-exe <path>] [-- <app args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [-- <setoolbox args>]
 
 Options:
-  --run                     Check/install dependencies, bootstrap app if missing, then run via Wine.
-  --app <target>            App target: auto (default), torch, setoolbox.
-  --backend <mode>          Runtime backend: auto (default), wine, distrobox.
-  --install-new             Force download/extract a fresh copy of the selected app.
-  --wineprefix <path>       Wine prefix path (default: $WINEPREFIX_DEFAULT)
-  --torch-dir <path>        Torch install directory (default: $TORCH_DIR)
-  --setoolbox-dir <path>    SEToolbox install directory (default: $SETOOLBOX_DIR)
-  --torch-exe <path>        Explicit path to Torch executable.
-  --setoolbox-exe <path>    Explicit path to SEToolbox executable.
-  -h, --help                Show help.
+  --run                  Check/install dependencies, bootstrap SEToolbox if missing, then run via Wine.
+  --backend <mode>       Runtime backend: auto (default), wine, distrobox.
+  --install-new          Force download/extract into a new instance directory under <setoolbox-dir>/instances.
+  --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
+  --setoolbox-dir <path> SEToolbox install directory (default: $SETOOLBOX_DIR)
+  --setoolbox-exe <path> Explicit path to SEToolbox executable.
+  -h, --help             Show help.
 
 Examples:
   ./$(basename "$0") --run
-  ./$(basename "$0") --run --app setoolbox
-  ./$(basename "$0") --run --app torch -- --help
+  ./$(basename "$0") --run -- --help
 USAGE
 }
 
@@ -180,7 +172,7 @@ ensure_linux_dependencies() {
 
   if [ "$missing" -eq 1 ]; then
     if is_immutable_os; then
-      err "Missing Linux dependencies on an immutable OS. Use --backend distrobox to run in a container."
+      err "Missing Linux dependencies on an immutable OS. Use --backend distrobox to run SEToolbox in a container."
     fi
     install_linux_dependencies "$(detect_pm)"
   else
@@ -220,76 +212,9 @@ apply_wine_gdi_patch() {
   mkdir -p "$WINEPREFIX"
 
   # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
-  # For Torch and SEToolbox, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
+  # For SEToolbox, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
   log "Applying Wine graphics patch: Direct3D renderer = gdi"
   wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
-}
-
-resolve_torch_exe_optional() {
-  if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
-    printf '%s\n' "$TORCH_EXE"
-    return
-  fi
-
-  local -a exe_candidates=()
-  local candidate
-  for candidate in \
-    "$TORCH_DIR/Torch.exe" \
-    "$TORCH_DIR/torch.exe" \
-    "$TORCH_DIR/torch-server.exe" \
-    "$TORCH_DIR/Torch.Server.exe"; do
-    if [ -f "$candidate" ]; then
-      exe_candidates+=("$candidate")
-    fi
-  done
-
-  if [ -d "$TORCH_DIR" ]; then
-    while IFS= read -r candidate; do
-      [ -n "$candidate" ] || continue
-      exe_candidates+=("$candidate")
-    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
-  fi
-
-  local -A seen=()
-  local -a unique_candidates=()
-  for candidate in "${exe_candidates[@]}"; do
-    if [ -z "${seen[$candidate]+x}" ]; then
-      seen["$candidate"]=1
-      unique_candidates+=("$candidate")
-    fi
-  done
-
-  local total="${#unique_candidates[@]}"
-  if [ "$total" -eq 0 ]; then
-    return
-  fi
-
-  if [ "$total" -eq 1 ]; then
-    printf '%s\n' "${unique_candidates[0]}"
-    return
-  fi
-
-  if [ -t 0 ] && [ -t 1 ]; then
-    log "Multiple Torch instances detected. Select one to run:"
-    local i
-    for i in "${!unique_candidates[@]}"; do
-      printf '  %d) %s\n' "$((i + 1))" "${unique_candidates[$i]}" >&2
-    done
-
-    local choice
-    while true; do
-      printf 'Enter selection [1-%d]: ' "$total" >&2
-      IFS= read -r choice || break
-      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total" ]; then
-        printf '%s\n' "${unique_candidates[$((choice - 1))]}"
-        return
-      fi
-      printf 'Invalid selection. Please choose a number between 1 and %d.\n' "$total" >&2
-    done
-  fi
-
-  log "Multiple Torch instances detected in non-interactive mode; defaulting to: ${unique_candidates[0]}"
-  printf '%s\n' "${unique_candidates[0]}"
 }
 
 resolve_setoolbox_exe_optional() {
@@ -358,39 +283,16 @@ resolve_setoolbox_exe_optional() {
   printf '%s\n' "${unique_candidates[0]}"
 }
 
-download_zip() {
-  local url="$1"
-  local zip_path="$2"
-  local target_dir="$3"
-  local label="$4"
+download_setoolbox() {
+  local target_dir="$1"
 
-  log "Downloading latest $label build from $url"
-  rm -f "$zip_path"
-  curl -fL --retry 3 --retry-delay 2 -o "$zip_path" "$url"
+  log "Downloading latest SEToolbox build from $SETOOLBOX_ZIP_URL"
+  rm -f "$SETOOLBOX_ZIP_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$SETOOLBOX_ZIP_PATH" "$SETOOLBOX_ZIP_URL"
 
   mkdir -p "$target_dir"
-  unzip -oq "$zip_path" -d "$target_dir"
-  log "$label extracted to $target_dir"
-}
-
-download_torch_if_needed() {
-  local exe
-  exe="$(resolve_torch_exe_optional || true)"
-  if [ "$INSTALL_NEW" -eq 0 ] && [ -n "$exe" ]; then
-    log "Detected existing Torch executable at $exe; skipping download."
-    return
-  fi
-
-  if [ "$INSTALL_NEW" -eq 1 ]; then
-    local instance_dir
-    instance_dir="$TORCH_DIR/instances/torch-$(date +%Y%m%d-%H%M%S)"
-    download_zip "$TORCH_ZIP_URL" "$TORCH_ZIP_PATH" "$instance_dir" "Torch"
-    TORCH_EXE="$(resolve_torch_exe_optional || true)"
-    [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $instance_dir"
-    return
-  fi
-
-  download_zip "$TORCH_ZIP_URL" "$TORCH_ZIP_PATH" "$TORCH_DIR" "Torch"
+  unzip -oq "$SETOOLBOX_ZIP_PATH" -d "$target_dir"
+  log "SEToolbox extracted to $target_dir"
 }
 
 download_setoolbox_if_needed() {
@@ -404,101 +306,30 @@ download_setoolbox_if_needed() {
   if [ "$INSTALL_NEW" -eq 1 ]; then
     local instance_dir
     instance_dir="$SETOOLBOX_DIR/instances/setoolbox-$(date +%Y%m%d-%H%M%S)"
-    download_zip "$SETOOLBOX_ZIP_URL" "$SETOOLBOX_ZIP_PATH" "$instance_dir" "SEToolbox"
+    download_setoolbox "$instance_dir"
     SETOOLBOX_EXE="$(resolve_setoolbox_exe_optional || true)"
     [ -n "$SETOOLBOX_EXE" ] || err "SEToolbox download completed but no executable was found in $instance_dir"
     return
   fi
 
-  download_zip "$SETOOLBOX_ZIP_URL" "$SETOOLBOX_ZIP_PATH" "$SETOOLBOX_DIR" "SEToolbox"
+  download_setoolbox "$SETOOLBOX_DIR"
 }
 
-resolve_target_app() {
-  case "$APP_TARGET" in
-    torch|setoolbox)
-      printf '%s\n' "$APP_TARGET"
-      return
-      ;;
-    auto)
-      ;;
-    *)
-      err "Invalid --app '$APP_TARGET'. Valid values: auto, torch, setoolbox"
-      ;;
-  esac
-
-  local torch_candidate=""
-  local setoolbox_candidate=""
-  torch_candidate="$(resolve_torch_exe_optional || true)"
-  setoolbox_candidate="$(resolve_setoolbox_exe_optional || true)"
-
-  if [ -n "$torch_candidate" ] && [ -n "$setoolbox_candidate" ]; then
-    if [ -t 0 ] && [ -t 1 ]; then
-      log "Detected both Torch and SEToolbox. Choose which app to run:"
-      printf '  1) Torch (%s)\n' "$torch_candidate" >&2
-      printf '  2) SEToolbox (%s)\n' "$setoolbox_candidate" >&2
-      local choice
-      while true; do
-        printf 'Select app [1-2, default 1]: ' >&2
-        IFS= read -r choice || break
-        case "$choice" in
-          ""|1|torch)
-            printf 'torch\n'
-            return
-            ;;
-          2|setoolbox)
-            printf 'setoolbox\n'
-            return
-            ;;
-          *)
-            printf 'Invalid selection. Enter 1 or 2.\n' >&2
-            ;;
-        esac
-      done
-    fi
-
-    log "Auto app selection found Torch and SEToolbox; defaulting to Torch in non-interactive mode."
-    printf 'torch\n'
-    return
-  fi
-
-  if [ -n "$torch_candidate" ]; then
-    printf 'torch\n'
-    return
-  fi
-
-  if [ -n "$setoolbox_candidate" ]; then
-    printf 'setoolbox\n'
-    return
-  fi
-
-  log "No app binaries detected; defaulting to Torch for first-time bootstrap in auto mode."
-  printf 'torch\n'
+resolve_setoolbox_exe_required() {
+  local exe
+  exe="$(resolve_setoolbox_exe_optional || true)"
+  [ -n "$exe" ] || err "Unable to locate SEToolbox executable in $SETOOLBOX_DIR"
+  printf '%s\n' "$exe"
 }
 
-run_target_app() {
-  local app="$1"
-  shift
+run_setoolbox() {
+  local exe
+  exe="$(resolve_setoolbox_exe_required)"
 
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
 
-  local exe=""
-  case "$app" in
-    torch)
-      exe="$(resolve_torch_exe_optional || true)"
-      [ -n "$exe" ] || err "Unable to locate Torch executable in $TORCH_DIR"
-      log "Launching Torch via Wine: $exe"
-      ;;
-    setoolbox)
-      exe="$(resolve_setoolbox_exe_optional || true)"
-      [ -n "$exe" ] || err "Unable to locate SEToolbox executable in $SETOOLBOX_DIR"
-      log "Launching SEToolbox via Wine: $exe"
-      ;;
-    *)
-      err "Unsupported app target: $app"
-      ;;
-  esac
-
+  log "Launching SEToolbox via Wine: $exe"
   wine "$exe" "$@"
 }
 
@@ -520,11 +351,9 @@ run_inside_distrobox() {
 RUN=0
 INSTALL_NEW=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
-TORCH_EXE=""
 SETOOLBOX_EXE=""
-APP_ARGS=()
+SETOOLBOX_ARGS=()
 BACKEND="$BACKEND_DEFAULT"
-APP_TARGET="$APP_DEFAULT"
 BACKEND_SET=0
 
 while [ "$#" -gt 0 ]; do
@@ -535,12 +364,6 @@ while [ "$#" -gt 0 ]; do
       ;;
     --install-new)
       INSTALL_NEW=1
-      shift
-      ;;
-    --app)
-      shift
-      [ "$#" -gt 0 ] || err "--app requires one of: auto, torch, setoolbox"
-      APP_TARGET="$1"
       shift
       ;;
     --backend)
@@ -556,22 +379,10 @@ while [ "$#" -gt 0 ]; do
       WINEPREFIX="$1"
       shift
       ;;
-    --torch-dir)
-      shift
-      [ "$#" -gt 0 ] || err "--torch-dir requires a path"
-      TORCH_DIR="$1"
-      shift
-      ;;
     --setoolbox-dir)
       shift
       [ "$#" -gt 0 ] || err "--setoolbox-dir requires a path"
       SETOOLBOX_DIR="$1"
-      shift
-      ;;
-    --torch-exe)
-      shift
-      [ "$#" -gt 0 ] || err "--torch-exe requires a path"
-      TORCH_EXE="$1"
       shift
       ;;
     --setoolbox-exe)
@@ -586,7 +397,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --)
       shift
-      APP_ARGS=("$@")
+      SETOOLBOX_ARGS=("$@")
       break
       ;;
     *)
@@ -618,38 +429,23 @@ if [ "$BACKEND_SET" -eq 0 ] && [ "$BACKEND" = "wine" ] && is_immutable_os && hav
 fi
 
 if [ "$BACKEND" = "distrobox" ]; then
-  RERUN_ARGS=(--run --backend wine --app "$APP_TARGET" --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR" --setoolbox-dir "$SETOOLBOX_DIR")
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --setoolbox-dir "$SETOOLBOX_DIR")
   if [ "$INSTALL_NEW" -eq 1 ]; then
     RERUN_ARGS+=(--install-new)
-  fi
-  if [ -n "$TORCH_EXE" ]; then
-    RERUN_ARGS+=(--torch-exe "$TORCH_EXE")
   fi
   if [ -n "$SETOOLBOX_EXE" ]; then
     RERUN_ARGS+=(--setoolbox-exe "$SETOOLBOX_EXE")
   fi
-  if [ "${#APP_ARGS[@]}" -gt 0 ]; then
-    RERUN_ARGS+=(-- "${APP_ARGS[@]}")
+  if [ "${#SETOOLBOX_ARGS[@]}" -gt 0 ]; then
+    RERUN_ARGS+=(-- "${SETOOLBOX_ARGS[@]}")
   fi
   run_inside_distrobox "${RERUN_ARGS[@]}"
   exit 0
 fi
 
-SELECTED_APP="$(resolve_target_app)"
-
 ensure_linux_dependencies
-case "$SELECTED_APP" in
-  torch)
-    download_torch_if_needed
-    ;;
-  setoolbox)
-    download_setoolbox_if_needed
-    ;;
-  *)
-    err "Unhandled app target: $SELECTED_APP"
-    ;;
-esac
+download_setoolbox_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
 apply_wine_gdi_patch
-run_target_app "$SELECTED_APP" "${APP_ARGS[@]}"
+run_setoolbox "${SETOOLBOX_ARGS[@]}"

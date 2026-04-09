@@ -2,5 +2,452 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -euo pipefail
 
+APP_NAME="linux-torch-wrapper"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec "$SCRIPT_DIR/torch-se-wrapper" "$@"
+TORCH_DIR="$SCRIPT_DIR/torch"
+TORCH_ZIP_URL="https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip"
+TORCH_ZIP_PATH="$SCRIPT_DIR/torch-server.zip"
+WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
+BACKEND_DEFAULT="auto"
+DISTROBOX_NAME_DEFAULT="linux-torch-wrapper"
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+
+Options:
+  --run                  Check/install dependencies, bootstrap Torch if missing, then run via Wine.
+  --backend <mode>       Runtime backend: auto (default), wine, distrobox.
+  --install-new          Force download/extract into a new instance directory under <torch-dir>/instances.
+  --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
+  --torch-dir <path>     Torch install directory (default: $TORCH_DIR)
+  --torch-exe <path>     Explicit path to Torch executable.
+  -h, --help             Show help.
+
+Examples:
+  ./$(basename "$0") --run
+  ./$(basename "$0") --run -- --help
+USAGE
+}
+
+log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+run_privileged() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    "$@"
+  elif have sudo; then
+    sudo "$@"
+  else
+    err "Need root or sudo for dependency install: $*"
+  fi
+}
+
+detect_pm() {
+  if have apt-get; then echo apt; return; fi
+  if have dnf; then echo dnf; return; fi
+  if have yum; then echo yum; return; fi
+  if have pacman; then echo pacman; return; fi
+  if have zypper; then echo zypper; return; fi
+  echo ""
+}
+
+install_linux_dependencies() {
+  local pm="$1"
+  log "Installing dependencies with $pm"
+  case "$pm" in
+    apt)
+      run_privileged dpkg --add-architecture i386
+      run_privileged apt-get update
+      run_privileged apt-get install -y wine64 wine32 winetricks curl unzip cabextract
+      ;;
+    dnf)
+      run_privileged dnf install -y wine winetricks curl unzip cabextract
+      ;;
+    yum)
+      run_privileged yum install -y wine winetricks curl unzip cabextract
+      ;;
+    pacman)
+      run_privileged pacman -Sy --noconfirm wine winetricks curl unzip cabextract
+      ;;
+    zypper)
+      run_privileged zypper --non-interactive install wine winetricks curl unzip cabextract
+      ;;
+    *)
+      err "Unsupported package manager. Install wine, winetricks, curl, unzip, cabextract manually."
+      ;;
+  esac
+}
+
+is_immutable_os() {
+  if [ -f /run/ostree-booted ]; then
+    return 0
+  fi
+
+  if [ -f /run/.containerenv ]; then
+    return 1
+  fi
+
+  if have rpm-ostree; then
+    return 0
+  fi
+
+  if have transactional-update; then
+    return 0
+  fi
+
+  local os_release_file=""
+  if [ -r /etc/os-release ]; then
+    os_release_file="/etc/os-release"
+  elif [ -r /usr/lib/os-release ]; then
+    os_release_file="/usr/lib/os-release"
+  fi
+
+  if [ -n "$os_release_file" ]; then
+    if grep -Eiq '(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|atomic|immutable|ostree|bootc|bazzite|bluefin|aurora|ublue|ucore)' "$os_release_file"; then
+      return 0
+    fi
+
+    # Handle distros that expose immutable hints only in specific os-release keys.
+    local os_release_tokens
+    os_release_tokens="$(
+      sed -nE 's/^(ID|ID_LIKE|VARIANT|VARIANT_ID|IMAGE_ID|NAME|PRETTY_NAME)=["'\'']?([^"'\'']+)["'\'']?/\2/p' "$os_release_file" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr ' -' '\n'
+    )"
+    if printf '%s\n' "$os_release_tokens" | grep -Eq '(atomic|immutable|ostree|bootc|silverblue|kinoite|sericea|onyx|coreos|microos|aeon|bazzite|bluefin|aurora|ublue|ucore)'; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+select_backend_for_auto() {
+  if is_immutable_os; then
+    printf '[%s] %s\n' "$APP_NAME" "Detected immutable OS; defaulting backend to distrobox." >&2
+    printf 'distrobox\n'
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Choose runtime backend:"
+    printf '  1) wine (run directly on the current system)\n' >&2
+    printf '  2) distrobox (run inside a distrobox container)\n' >&2
+
+    local choice
+    while true; do
+      printf 'Select backend [1-2, default 1]: ' >&2
+      IFS= read -r choice || break
+      case "$choice" in
+        ""|1|wine)
+          printf 'wine\n'
+          return
+          ;;
+        2|distrobox)
+          printf 'distrobox\n'
+          return
+          ;;
+        *)
+          printf 'Invalid selection. Enter 1 or 2.\n' >&2
+          ;;
+      esac
+    done
+  fi
+
+  printf '[%s] %s\n' "$APP_NAME" "Non-interactive auto mode; defaulting backend to wine." >&2
+  printf 'wine\n'
+}
+
+ensure_linux_dependencies() {
+  local missing=0
+  local cmd
+  for cmd in wine winetricks curl unzip; do
+    if ! have "$cmd"; then
+      missing=1
+      break
+    fi
+  done
+
+  if [ "$missing" -eq 1 ]; then
+    if is_immutable_os; then
+      err "Missing Linux dependencies on an immutable OS. Use --backend distrobox to run Torch in a container."
+    fi
+    install_linux_dependencies "$(detect_pm)"
+  else
+    log "Linux dependencies already installed."
+  fi
+}
+
+ensure_winetricks_dependencies() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local marker="$WINEPREFIX/.torch-wrapper-winetricks-done"
+  if [ -f "$marker" ]; then
+    log "Winetricks bootstrap already completed for this prefix."
+    return
+  fi
+
+  log "Initializing Wine prefix"
+  wineboot -u
+
+  log "Bootstrapping Winetricks dependencies in $WINEPREFIX"
+  winetricks -q corefonts vcrun2022 dotnet48
+  touch "$marker"
+}
+
+ensure_wine_windows_version() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  log "Setting Wine Windows version override for SteamCMD to Windows 10"
+  wine reg add "HKCU\\Software\\Wine\\Version" /v Version /t REG_SZ /d win10 /f >/dev/null
+  wine reg add "HKCU\\Software\\Wine\\AppDefaults\\steamcmd.exe" /v Version /t REG_SZ /d win10 /f >/dev/null
+}
+
+apply_wine_gdi_patch() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  # Some Wine setups render WinForms/WPF context menus as solid black rectangles.
+  # For Torch, forcing Wine's Direct3D renderer to GDI is more stable than OpenGL/Vulkan.
+  log "Applying Wine graphics patch: Direct3D renderer = gdi"
+  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+}
+
+resolve_torch_exe_optional() {
+  if [ -n "$TORCH_EXE" ] && [ -f "$TORCH_EXE" ]; then
+    printf '%s\n' "$TORCH_EXE"
+    return
+  fi
+
+  local -a exe_candidates=()
+  local candidate
+  for candidate in \
+    "$TORCH_DIR/Torch.exe" \
+    "$TORCH_DIR/torch.exe" \
+    "$TORCH_DIR/torch-server.exe" \
+    "$TORCH_DIR/Torch.Server.exe"; do
+    if [ -f "$candidate" ]; then
+      exe_candidates+=("$candidate")
+    fi
+  done
+
+  if [ -d "$TORCH_DIR" ]; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      exe_candidates+=("$candidate")
+    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
+  fi
+
+  local -A seen=()
+  local -a unique_candidates=()
+  for candidate in "${exe_candidates[@]}"; do
+    if [ -z "${seen[$candidate]+x}" ]; then
+      seen["$candidate"]=1
+      unique_candidates+=("$candidate")
+    fi
+  done
+
+  local total="${#unique_candidates[@]}"
+  if [ "$total" -eq 0 ]; then
+    return
+  fi
+
+  if [ "$total" -eq 1 ]; then
+    printf '%s\n' "${unique_candidates[0]}"
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Multiple Torch instances detected. Select one to run:"
+    local i
+    for i in "${!unique_candidates[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${unique_candidates[$i]}" >&2
+    done
+
+    local choice
+    while true; do
+      printf 'Enter selection [1-%d]: ' "$total" >&2
+      IFS= read -r choice || break
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total" ]; then
+        printf '%s\n' "${unique_candidates[$((choice - 1))]}"
+        return
+      fi
+      printf 'Invalid selection. Please choose a number between 1 and %d.\n' "$total" >&2
+    done
+  fi
+
+  log "Multiple Torch instances detected in non-interactive mode; defaulting to: ${unique_candidates[0]}"
+  printf '%s\n' "${unique_candidates[0]}"
+}
+
+download_torch() {
+  local target_dir="$1"
+
+  log "Downloading latest Torch build from $TORCH_ZIP_URL"
+  rm -f "$TORCH_ZIP_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$TORCH_ZIP_PATH" "$TORCH_ZIP_URL"
+
+  mkdir -p "$target_dir"
+  unzip -oq "$TORCH_ZIP_PATH" -d "$target_dir"
+  log "Torch extracted to $target_dir"
+}
+
+download_torch_if_needed() {
+  local exe
+  exe="$(resolve_torch_exe_optional || true)"
+  if [ "$INSTALL_NEW" -eq 0 ] && [ -n "$exe" ]; then
+    log "Detected existing Torch executable at $exe; skipping download."
+    return
+  fi
+
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    local instance_dir
+    instance_dir="$TORCH_DIR/instances/torch-$(date +%Y%m%d-%H%M%S)"
+    download_torch "$instance_dir"
+    TORCH_EXE="$(resolve_torch_exe_optional || true)"
+    [ -n "$TORCH_EXE" ] || err "Torch download completed but no executable was found in $instance_dir"
+    return
+  fi
+
+  download_torch "$TORCH_DIR"
+}
+
+resolve_torch_exe_required() {
+  local exe
+  exe="$(resolve_torch_exe_optional || true)"
+  [ -n "$exe" ] || err "Unable to locate Torch executable in $TORCH_DIR"
+  printf '%s\n' "$exe"
+}
+
+run_torch() {
+  local exe
+  exe="$(resolve_torch_exe_required)"
+
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  log "Launching Torch via Wine: $exe"
+  wine "$exe" "$@"
+}
+
+run_inside_distrobox() {
+  local -a forward_args=("$@")
+  local distrobox_name="${DISTROBOX_NAME:-$DISTROBOX_NAME_DEFAULT}"
+  local launch_cwd="${LAUNCH_CWD:-$PWD}"
+
+  have distrobox || err "distrobox backend selected but 'distrobox' is not installed."
+  have distrobox-enter || err "distrobox backend selected but 'distrobox-enter' is not installed."
+
+  log "Preparing distrobox container '$distrobox_name' with home '$launch_cwd'"
+  distrobox create --yes --name "$distrobox_name" --image quay.io/toolbx/ubuntu-toolbox:latest --home "$launch_cwd"
+
+  log "Entering distrobox '$distrobox_name' and reinvoking wrapper"
+  distrobox-enter --name "$distrobox_name" -- "$0" "${forward_args[@]}"
+}
+
+RUN=0
+INSTALL_NEW=0
+WINEPREFIX="$WINEPREFIX_DEFAULT"
+TORCH_EXE=""
+TORCH_ARGS=()
+BACKEND="$BACKEND_DEFAULT"
+BACKEND_SET=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --run)
+      RUN=1
+      shift
+      ;;
+    --install-new)
+      INSTALL_NEW=1
+      shift
+      ;;
+    --backend)
+      shift
+      [ "$#" -gt 0 ] || err "--backend requires one of: auto, wine, distrobox"
+      BACKEND="$1"
+      BACKEND_SET=1
+      shift
+      ;;
+    --wineprefix)
+      shift
+      [ "$#" -gt 0 ] || err "--wineprefix requires a path"
+      WINEPREFIX="$1"
+      shift
+      ;;
+    --torch-dir)
+      shift
+      [ "$#" -gt 0 ] || err "--torch-dir requires a path"
+      TORCH_DIR="$1"
+      shift
+      ;;
+    --torch-exe)
+      shift
+      [ "$#" -gt 0 ] || err "--torch-exe requires a path"
+      TORCH_EXE="$1"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      TORCH_ARGS=("$@")
+      break
+      ;;
+    *)
+      err "Unknown option: $1"
+      ;;
+  esac
+done
+
+if [ "$RUN" -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+case "$BACKEND" in
+  auto|wine|distrobox)
+    ;;
+  *)
+    err "Invalid --backend '$BACKEND'. Valid values: auto, wine, distrobox"
+    ;;
+esac
+
+if [ "$BACKEND" = "auto" ]; then
+  BACKEND="$(select_backend_for_auto)"
+fi
+
+if [ "$BACKEND_SET" -eq 0 ] && [ "$BACKEND" = "wine" ] && is_immutable_os && have distrobox && have distrobox-enter; then
+  log "Immutable OS detected with distrobox available; switching backend to distrobox to avoid host package installation."
+  BACKEND="distrobox"
+fi
+
+if [ "$BACKEND" = "distrobox" ]; then
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --torch-dir "$TORCH_DIR")
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    RERUN_ARGS+=(--install-new)
+  fi
+  if [ -n "$TORCH_EXE" ]; then
+    RERUN_ARGS+=(--torch-exe "$TORCH_EXE")
+  fi
+  if [ "${#TORCH_ARGS[@]}" -gt 0 ]; then
+    RERUN_ARGS+=(-- "${TORCH_ARGS[@]}")
+  fi
+  run_inside_distrobox "${RERUN_ARGS[@]}"
+  exit 0
+fi
+
+ensure_linux_dependencies
+download_torch_if_needed
+ensure_winetricks_dependencies
+ensure_wine_windows_version
+apply_wine_gdi_patch
+run_torch "${TORCH_ARGS[@]}"

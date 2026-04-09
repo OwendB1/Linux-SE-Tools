@@ -1,55 +1,53 @@
 # Linux Torch Wrapper
 
-A thin wrapper that runs Torch and SEToolbox through Wine and can bootstrap either app with a single command.
+This repo now provides two separate launchers that share the same Wine-prefix workflow:
 
-## One-command usage
+- `./torch-wrapper` for Torch
+- `./se-toolbox-wrapper` for SEToolbox
 
-```bash
-./torch-se-wrapper --run
-```
+Both scripts can install dependencies, download/extract the app, apply Wine compatibility settings (including the GDI renderer patch), and launch with Wine.
 
-`--run` will:
-
-1. Resolve runtime backend based on `--backend`:
-   - `auto` (default): interactive prompt on mutable systems to choose `wine` vs `distrobox`; defaults to `distrobox` on immutable systems.
-   - `wine`: run directly on host.
-   - `distrobox`: create/enter distrobox, then reinvoke wrapper with `--backend wine` inside the container.
-2. Resolve app target based on `--app`:
-   - `auto` (default): detect existing binaries and select `torch` or `setoolbox`.
-   - `torch`: run Torch.
-   - `setoolbox`: run Space Engineers Toolbox.
-3. Check for required Linux dependencies (`wine`, `winetricks`, `curl`, `unzip`) and install them if missing.
-4. Download and extract the selected app when no executable is found:
-   - Torch from `https://build.torchapi.com/job/Torch/job/master/lastSuccessfulBuild/artifact/bin/torch-server.zip`
-   - SEToolbox from `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`
-5. Bootstrap Wine prefix dependencies (once per prefix).
-6. Set Wine Windows version overrides to `win10` (global + `steamcmd.exe` AppDefault).
-7. Apply the Wine graphics compatibility patch (`Direct3D\\renderer=gdi`) for both Torch and SEToolbox.
-8. Launch the selected executable via Wine.
-
-If binaries are already installed (an existing executable is detected), download is skipped unless `--install-new` is used.
-When multiple binaries are detected, `--run` prompts you to select which one to launch.
-
-## Options
+## Torch launcher
 
 ```bash
-./torch-se-wrapper --run [--app <auto|torch|setoolbox>] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--setoolbox-dir <path>] [--torch-exe <path>] [--setoolbox-exe <path>] [-- <app args>]
+./torch-wrapper --run
 ```
 
-- `--run`: required main action.
-- `--app <auto|torch|setoolbox>`: choose app target (default: `auto`).
-- `--backend <auto|wine|distrobox>`: choose execution backend (default: `auto`).
-- `--install-new`: force installation of a new instance for the selected app.
-- `--wineprefix <path>`: override Wine prefix (default: `./.wine-torch` beside the wrapper).
-- `--torch-dir <path>`: override Torch install directory (default: `./torch`).
-- `--setoolbox-dir <path>`: override SEToolbox install directory (default: `./setoolbox`).
-- `--torch-exe <path>`: explicitly point to a Torch executable.
-- `--setoolbox-exe <path>`: explicitly point to a SEToolbox executable.
-- `-- <app args>`: pass extra arguments directly to the selected app.
+Options:
 
-## Compatibility
+```bash
+./torch-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--torch-dir <path>] [--torch-exe <path>] [-- <torch args>]
+```
 
-- `./torch-wrapper` is kept as a compatibility shim and forwards to `./torch-se-wrapper`.
+Default paths:
+- Wine prefix: `./.wine-torch`
+- Install dir: `./torch`
+
+## SEToolbox launcher
+
+```bash
+./se-toolbox-wrapper --run
+```
+
+Options:
+
+```bash
+./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [-- <setoolbox args>]
+```
+
+Default paths:
+- Wine prefix: `./.wine-torch` (shared with Torch by default)
+- Install dir: `./setoolbox`
+- Download URL: `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`
+
+## Compatibility behavior
+
+- Both launchers support `--backend auto|wine|distrobox`.
+- On immutable systems with distrobox available, auto mode prefers distrobox.
+- Both launchers apply:
+  - Winetricks bootstrap (`corefonts vcrun2022 dotnet48`)
+  - Windows version override to `win10`
+  - Graphics fix: `HKCU\\Software\\Wine\\Direct3D\\renderer=gdi`
 
 ## License
 
