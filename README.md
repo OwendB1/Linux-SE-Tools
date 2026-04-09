@@ -32,13 +32,14 @@ Default paths:
 Options:
 
 ```bash
-./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [-- <setoolbox args>]
+./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [-- <setoolbox args>]
 ```
 
 Default paths:
 - Wine prefix: `./.wine-torch` (shared with Torch by default)
 - Install dir: `./setoolbox`
 - Download asset selection: scans latest release assets for `SEToolbox-*.zip` via GitHub API (falls back to `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`)
+- Steam folder linking: auto-detects host Steam install and links it to `C:\Program Files (x86)\Steam` inside the Wine prefix (override with `--steam-install-dir <path>`)
 
 ## Compatibility behavior
 

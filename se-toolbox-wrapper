@@ -14,7 +14,7 @@ DISTROBOX_NAME_DEFAULT="linux-se-toolbox-wrapper"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [-- <setoolbox args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [-- <setoolbox args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap SEToolbox if missing, then run via Wine.
@@ -23,6 +23,9 @@ Options:
   --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
   --setoolbox-dir <path> SEToolbox install directory (default: $SETOOLBOX_DIR)
   --setoolbox-exe <path> Explicit path to SEToolbox executable.
+  --steam-install-dir <path>
+                         Host Steam install directory to link into prefix
+                         (auto-detected by default).
   -h, --help             Show help.
 
 Examples:
@@ -218,6 +221,63 @@ apply_wine_gdi_patch() {
   wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
 }
 
+resolve_steam_install_dir_optional() {
+  if [ -n "$STEAM_INSTALL_DIR" ]; then
+    if [ -d "$STEAM_INSTALL_DIR/steamapps" ]; then
+      printf '%s\n' "$STEAM_INSTALL_DIR"
+      return
+    fi
+    err "--steam-install-dir must contain a steamapps directory: $STEAM_INSTALL_DIR"
+  fi
+
+  local -a candidates=(
+    "$HOME/.steam/steam"
+    "$HOME/.local/share/Steam"
+    "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam"
+    "$HOME/.var/app/com.valvesoftware.Steam/data/Steam"
+  )
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -d "$candidate/steamapps" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+}
+
+link_steam_install_into_prefix() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local steam_dir
+  steam_dir="$(resolve_steam_install_dir_optional || true)"
+  if [ -z "$steam_dir" ]; then
+    log "No Steam install detected on host; skipping prefix Steam link."
+    return
+  fi
+
+  local steam_target="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
+  mkdir -p "$(dirname "$steam_target")"
+
+  if [ -L "$steam_target" ]; then
+    local current_target
+    current_target="$(readlink "$steam_target")"
+    if [ "$current_target" = "$steam_dir" ]; then
+      log "Steam link already configured in prefix: $steam_target -> $steam_dir"
+      return
+    fi
+    rm -f "$steam_target"
+  elif [ -e "$steam_target" ]; then
+    local backup_path="$steam_target.wrapper-backup-$(date +%Y%m%d-%H%M%S)"
+    mv "$steam_target" "$backup_path"
+    log "Existing Wine Steam directory moved to $backup_path"
+  fi
+
+  ln -s "$steam_dir" "$steam_target"
+  log "Linked host Steam install into Wine prefix: $steam_target -> $steam_dir"
+}
+
 resolve_setoolbox_exe_optional() {
   if [ -n "$SETOOLBOX_EXE" ] && [ -f "$SETOOLBOX_EXE" ]; then
     printf '%s\n' "$SETOOLBOX_EXE"
@@ -394,6 +454,7 @@ RUN=0
 INSTALL_NEW=0
 WINEPREFIX="$WINEPREFIX_DEFAULT"
 SETOOLBOX_EXE=""
+STEAM_INSTALL_DIR=""
 SETOOLBOX_ARGS=()
 BACKEND="$BACKEND_DEFAULT"
 BACKEND_SET=0
@@ -431,6 +492,12 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--setoolbox-exe requires a path"
       SETOOLBOX_EXE="$1"
+      shift
+      ;;
+    --steam-install-dir)
+      shift
+      [ "$#" -gt 0 ] || err "--steam-install-dir requires a path"
+      STEAM_INSTALL_DIR="$1"
       shift
       ;;
     -h|--help)
@@ -478,6 +545,9 @@ if [ "$BACKEND" = "distrobox" ]; then
   if [ -n "$SETOOLBOX_EXE" ]; then
     RERUN_ARGS+=(--setoolbox-exe "$SETOOLBOX_EXE")
   fi
+  if [ -n "$STEAM_INSTALL_DIR" ]; then
+    RERUN_ARGS+=(--steam-install-dir "$STEAM_INSTALL_DIR")
+  fi
   if [ "${#SETOOLBOX_ARGS[@]}" -gt 0 ]; then
     RERUN_ARGS+=(-- "${SETOOLBOX_ARGS[@]}")
   fi
@@ -490,4 +560,5 @@ download_setoolbox_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
 apply_wine_gdi_patch
+link_steam_install_into_prefix
 run_setoolbox "${SETOOLBOX_ARGS[@]}"
