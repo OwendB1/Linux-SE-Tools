@@ -38,7 +38,7 @@ Options:
 Default paths:
 - Wine prefix: `./.wine-torch` (shared with Torch by default)
 - Install dir: `./setoolbox`
-- Download URL: `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`
+- Download asset selection: scans latest release assets for `SEToolbox-*.zip` via GitHub API (falls back to `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`)
 
 ## Compatibility behavior
 
