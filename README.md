@@ -1,6 +1,6 @@
-# Linux Torch Wrapper
+# Linux-SE-Tools
 
-This repo now provides two separate launchers that share the same Wine-prefix workflow:
+Linux-SE-Tools provides two separate launchers that share the same Wine-prefix workflow:
 
 - `./torch-wrapper` for Torch
 - `./se-toolbox-wrapper` for SEToolbox
