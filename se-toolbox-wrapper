@@ -245,6 +245,16 @@ resolve_setoolbox_exe_optional() {
   local -A seen=()
   local -a unique_candidates=()
   for candidate in "${exe_candidates[@]}"; do
+    local basename_lower
+    basename_lower="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
+
+    # Ignore updater/helper binaries when resolving the main launch target.
+    case "$basename_lower" in
+      setoolboxupdate.exe|setoolbox-updater.exe|setoolboxupdater.exe)
+        continue
+        ;;
+    esac
+
     if [ -z "${seen[$candidate]+x}" ]; then
       seen["$candidate"]=1
       unique_candidates+=("$candidate")
@@ -262,7 +272,7 @@ resolve_setoolbox_exe_optional() {
   fi
 
   if [ -t 0 ] && [ -t 1 ]; then
-    log "Multiple SEToolbox binaries detected. Select one to run:"
+    printf '[%s] %s\n' "$APP_NAME" "Multiple SEToolbox binaries detected. Select one to run:" >&2
     local i
     for i in "${!unique_candidates[@]}"; do
       printf '  %d) %s\n' "$((i + 1))" "${unique_candidates[$i]}" >&2
@@ -280,7 +290,7 @@ resolve_setoolbox_exe_optional() {
     done
   fi
 
-  log "Multiple SEToolbox binaries detected in non-interactive mode; defaulting to: ${unique_candidates[0]}"
+  printf '[%s] %s\n' "$APP_NAME" "Multiple SEToolbox binaries detected in non-interactive mode; defaulting to: ${unique_candidates[0]}" >&2
   printf '%s\n' "${unique_candidates[0]}"
 }
 
