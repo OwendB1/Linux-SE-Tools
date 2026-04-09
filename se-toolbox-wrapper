@@ -5,7 +5,8 @@ set -euo pipefail
 APP_NAME="linux-se-toolbox-wrapper"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETOOLBOX_DIR="$SCRIPT_DIR/setoolbox"
-SETOOLBOX_ZIP_URL="https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip"
+SETOOLBOX_RELEASE_API_URL="https://api.github.com/repos/mmusu3/SEToolbox/releases/latest"
+SETOOLBOX_ZIP_URL_FALLBACK="https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip"
 SETOOLBOX_ZIP_PATH="$SCRIPT_DIR/setoolbox.zip"
 WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-torch"
 BACKEND_DEFAULT="auto"
@@ -285,14 +286,45 @@ resolve_setoolbox_exe_optional() {
 
 download_setoolbox() {
   local target_dir="$1"
+  local setoolbox_zip_url
+  setoolbox_zip_url="$(resolve_setoolbox_zip_url)"
 
-  log "Downloading latest SEToolbox build from $SETOOLBOX_ZIP_URL"
+  log "Downloading latest SEToolbox build from $setoolbox_zip_url"
   rm -f "$SETOOLBOX_ZIP_PATH"
-  curl -fL --retry 3 --retry-delay 2 -o "$SETOOLBOX_ZIP_PATH" "$SETOOLBOX_ZIP_URL"
+  curl -fL --retry 3 --retry-delay 2 -o "$SETOOLBOX_ZIP_PATH" "$setoolbox_zip_url"
 
   mkdir -p "$target_dir"
   unzip -oq "$SETOOLBOX_ZIP_PATH" -d "$target_dir"
   log "SEToolbox extracted to $target_dir"
+}
+
+resolve_setoolbox_zip_url() {
+  local latest_release_json
+  local zip_asset_url
+  local -a github_api_headers=(
+    -H "Accept: application/vnd.github+json"
+    -H "User-Agent: $APP_NAME"
+    -H "X-GitHub-Api-Version: 2022-11-28"
+  )
+
+  log "Resolving latest SEToolbox zip asset via release API"
+  latest_release_json="$(curl -fsSL --retry 3 --retry-delay 2 "${github_api_headers[@]}" "$SETOOLBOX_RELEASE_API_URL" || true)"
+  if [ -n "$latest_release_json" ]; then
+    zip_asset_url="$(
+      printf '%s\n' "$latest_release_json" \
+      | sed 's#\\/#/#g' \
+      | sed -nE 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p' \
+      | grep -E '/SEToolbox-[0-9][^/]*\.zip$' \
+      | head -n1 || true
+    )"
+    if [ -n "$zip_asset_url" ]; then
+      printf '%s\n' "$zip_asset_url"
+      return
+    fi
+  fi
+
+  log "Could not find a SEToolbox-*.zip asset in latest release metadata; falling back to $SETOOLBOX_ZIP_URL_FALLBACK"
+  printf '%s\n' "$SETOOLBOX_ZIP_URL_FALLBACK"
 }
 
 download_setoolbox_if_needed() {
