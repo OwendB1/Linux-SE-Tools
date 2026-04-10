@@ -40,6 +40,7 @@ Default paths:
 - Install dir: `./setoolbox`
 - Download asset selection: scans latest release assets for `SEToolbox-*.zip` via GitHub API (falls back to `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`)
 - Steam folder linking: auto-detects host Steam install and links it to `C:\Program Files (x86)\Steam` inside the Wine prefix (override with `--steam-install-dir <path>`)
+- Steam App ID environment: exports `SteamAppId` and `SteamGameId` before launch (defaults to `244850`; override with `STEAM_APP_ID=<id>`)
 
 ## Compatibility behavior
 
