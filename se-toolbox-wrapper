@@ -278,6 +278,31 @@ link_steam_install_into_prefix() {
   log "Linked host Steam install into Wine prefix: $steam_target -> $steam_dir"
 }
 
+ensure_spaceengineers_registry_keys() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local steam_dir
+  steam_dir="$(resolve_steam_install_dir_optional || true)"
+  if [ -z "$steam_dir" ]; then
+    log "No Steam install detected on host; skipping Space Engineers registry key setup."
+    return
+  fi
+
+  local se_native_path="$steam_dir/steamapps/common/SpaceEngineers"
+  if [ ! -d "$se_native_path" ]; then
+    log "Space Engineers directory not found at $se_native_path; skipping registry key setup."
+    return
+  fi
+
+  local se_windows_path
+  se_windows_path="$(winepath -w "$se_native_path")"
+
+  log "Configuring Space Engineers install registry keys for SEToolbox: $se_windows_path"
+  wine reg add "HKLM\\Software\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam App 244850" /v InstallLocation /t REG_SZ /d "$se_windows_path" /f >/dev/null
+  wine reg add "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Steam App 244850" /v InstallLocation /t REG_SZ /d "$se_windows_path" /f >/dev/null
+}
+
 resolve_setoolbox_exe_optional() {
   if [ -n "$SETOOLBOX_EXE" ] && [ -f "$SETOOLBOX_EXE" ]; then
     printf '%s\n' "$SETOOLBOX_EXE"
@@ -561,4 +586,5 @@ ensure_winetricks_dependencies
 ensure_wine_windows_version
 apply_wine_gdi_patch
 link_steam_install_into_prefix
+ensure_spaceengineers_registry_keys
 run_setoolbox "${SETOOLBOX_ARGS[@]}"
