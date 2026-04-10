@@ -452,12 +452,22 @@ resolve_setoolbox_exe_required() {
 run_setoolbox() {
   local exe
   exe="$(resolve_setoolbox_exe_required)"
+  local exe_dir
+  exe_dir="$(cd "$(dirname "$exe")" && pwd)"
+  local steam_app_id="${STEAM_APP_ID:-244850}"
 
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
+  export SteamAppId="$steam_app_id"
+  export SteamGameId="$steam_app_id"
 
   log "Launching SEToolbox via Wine: $exe"
-  wine "$exe" "$@"
+  log "Steam environment: SteamAppId=$SteamAppId SteamGameId=$SteamGameId"
+  log "Launching from executable directory: $exe_dir"
+  (
+    cd "$exe_dir"
+    wine "$exe" "$@"
+  )
 }
 
 run_inside_distrobox() {
