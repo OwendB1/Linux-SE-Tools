@@ -278,6 +278,71 @@ link_steam_install_into_prefix() {
   log "Linked host Steam install into Wine prefix: $steam_target -> $steam_dir"
 }
 
+link_spaceengineers_compatdata_into_prefix() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local steam_dir
+  steam_dir="$(resolve_steam_install_dir_optional || true)"
+  if [ -z "$steam_dir" ]; then
+    log "No Steam install detected on host; skipping Space Engineers compatdata link."
+    return
+  fi
+
+  local steam_app_id="${STEAM_APP_ID:-244850}"
+  local compatdata_source="$steam_dir/steamapps/compatdata/$steam_app_id/pfx/drive_c/users/steamuser/AppData/Roaming/SpaceEngineers"
+  if [ ! -d "$compatdata_source" ]; then
+    log "No Space Engineers compatdata directory found at $compatdata_source; skipping compatdata link."
+    return
+  fi
+
+  local users_root="$WINEPREFIX/drive_c/users"
+  if [ ! -d "$users_root" ]; then
+    log "Wine prefix users directory not found at $users_root; skipping compatdata link."
+    return
+  fi
+
+  local profile_dir
+  local linked_any=0
+  for profile_dir in "$users_root"/*; do
+    [ -d "$profile_dir" ] || continue
+
+    local profile_name
+    profile_name="$(basename "$profile_dir")"
+    case "$profile_name" in
+      Public|Default|Default\ User|All\ Users)
+        continue
+        ;;
+    esac
+
+    local target="$profile_dir/AppData/Roaming/SpaceEngineers"
+    mkdir -p "$(dirname "$target")"
+
+    if [ -L "$target" ]; then
+      local current_target
+      current_target="$(readlink "$target")"
+      if [ "$current_target" = "$compatdata_source" ]; then
+        log "Space Engineers compatdata link already configured for profile '$profile_name'."
+        linked_any=1
+        continue
+      fi
+      rm -f "$target"
+    elif [ -e "$target" ]; then
+      local backup_path="$target.wrapper-backup-$(date +%Y%m%d-%H%M%S)"
+      mv "$target" "$backup_path"
+      log "Existing Space Engineers data for profile '$profile_name' moved to $backup_path"
+    fi
+
+    ln -s "$compatdata_source" "$target"
+    log "Linked Space Engineers compatdata for profile '$profile_name': $target -> $compatdata_source"
+    linked_any=1
+  done
+
+  if [ "$linked_any" -eq 0 ]; then
+    log "No non-system Wine user profiles found under $users_root; skipped compatdata link."
+  fi
+}
+
 ensure_spaceengineers_registry_keys() {
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
@@ -596,5 +661,6 @@ ensure_winetricks_dependencies
 ensure_wine_windows_version
 apply_wine_gdi_patch
 link_steam_install_into_prefix
+link_spaceengineers_compatdata_into_prefix
 ensure_spaceengineers_registry_keys
 run_setoolbox "${SETOOLBOX_ARGS[@]}"
