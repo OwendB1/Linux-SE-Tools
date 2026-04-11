@@ -32,7 +32,7 @@ Default paths:
 Options:
 
 ```bash
-./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [-- <setoolbox args>]
+./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [--prefix-steam] [--prefix-steam-timeout <seconds>] [-- <setoolbox args>]
 ```
 
 Default paths:
@@ -42,6 +42,7 @@ Default paths:
 - Steam folder linking: auto-detects host Steam install and links it to `C:\Program Files (x86)\Steam` inside the Wine prefix (override with `--steam-install-dir <path>`)
 - Space Engineers roaming data linking: links `steamapps/compatdata/244850/pfx/drive_c/users/steamuser/AppData/Roaming/SpaceEngineers` into each non-system Wine profile at `{user}\AppData\Roaming\SpaceEngineers`
 - Steam App ID environment: exports `SteamAppId` and `SteamGameId` before launch (defaults to `244850`; override with `STEAM_APP_ID=<id>`)
+- Optional prefix Steam warmup: `--prefix-steam` downloads/installs `SteamSetup.exe` into the Wine prefix (if needed), starts `steam.exe` in silent mode, waits `--prefix-steam-timeout <seconds>` (default `15`), then launches SEToolbox
 
 ## Compatibility behavior
 
