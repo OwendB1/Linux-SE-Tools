@@ -14,7 +14,7 @@ DISTROBOX_NAME_DEFAULT="linux-se-toolbox-wrapper"
 
 usage() {
   cat <<USAGE
-Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [--prefix-steam] [--prefix-steam-timeout <seconds>] [-- <setoolbox args>]
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [--prefix-steam] [--prefix-steam-timeout <seconds>] [--prefix-steam-headless] [-- <setoolbox args>]
 
 Options:
   --run                  Check/install dependencies, bootstrap SEToolbox if missing, then run via Wine.
@@ -32,6 +32,9 @@ Options:
   --prefix-steam-timeout <seconds>
                          Wait time for Steam warmup before launching SEToolbox
                          (default: 15; env: PREFIX_STEAM_TIMEOUT).
+  --prefix-steam-headless
+                         Warm up prefix Steam in headless mode with -silent.
+                         By default Steam warmup runs in normal mode.
   -h, --help             Show help.
 
 Examples:
@@ -262,36 +265,43 @@ resolve_steam_install_dir_optional() {
   done
 }
 
-link_steam_install_into_prefix() {
+link_steamapps_common_into_prefix() {
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
+
+  local steamapps_dir="$WINEPREFIX/drive_c/Program Files (x86)/Steam/steamapps"
+  mkdir -p "$steamapps_dir"
 
   local steam_dir
   steam_dir="$(resolve_steam_install_dir_optional || true)"
   if [ -z "$steam_dir" ]; then
-    log "No Steam install detected on host; skipping prefix Steam link."
+    log "No Steam install detected on host; leaving prefix Steam steamapps directory local at $steamapps_dir"
     return
   fi
 
-  local steam_target="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
-  mkdir -p "$(dirname "$steam_target")"
-
-  if [ -L "$steam_target" ]; then
-    local current_target
-    current_target="$(readlink "$steam_target")"
-    if [ "$current_target" = "$steam_dir" ]; then
-      log "Steam link already configured in prefix: $steam_target -> $steam_dir"
-      return
-    fi
-    rm -f "$steam_target"
-  elif [ -e "$steam_target" ]; then
-    local backup_path="$steam_target.wrapper-backup-$(date +%Y%m%d-%H%M%S)"
-    mv "$steam_target" "$backup_path"
-    log "Existing Wine Steam directory moved to $backup_path"
+  local source_common="$steam_dir/steamapps/common"
+  local target_common="$steamapps_dir/common"
+  if [ ! -d "$source_common" ]; then
+    log "Host Steam common directory not found at $source_common; leaving prefix Steam steamapps directory local."
+    return
   fi
 
-  ln -s "$steam_dir" "$steam_target"
-  log "Linked host Steam install into Wine prefix: $steam_target -> $steam_dir"
+  if [ -L "$target_common" ]; then
+    local current_target
+    current_target="$(readlink "$target_common")"
+    if [ "$current_target" = "$source_common" ]; then
+      log "Steam common link already configured in prefix: $target_common -> $source_common"
+      return
+    fi
+    rm -f "$target_common"
+  elif [ -e "$target_common" ]; then
+    local backup_path="$target_common.wrapper-backup-$(date +%Y%m%d-%H%M%S)"
+    mv "$target_common" "$backup_path"
+    log "Existing prefix Steam common directory moved to $backup_path"
+  fi
+
+  ln -s "$source_common" "$target_common"
+  log "Linked host Steam common directory into Wine prefix: $target_common -> $source_common"
 }
 
 link_spaceengineers_compatdata_into_prefix() {
@@ -388,8 +398,10 @@ ensure_steam_windows_client_in_prefix() {
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
 
-  local steam_exe="$WINEPREFIX/drive_c/Program Files (x86)/Steam/steam.exe"
-  if [ -f "$steam_exe" ]; then
+  local steam_dir="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
+  local steam_exe
+  steam_exe="$(resolve_prefix_steam_exe_optional || true)"
+  if [ -n "$steam_exe" ]; then
     log "Steam Windows client already present in prefix: $steam_exe"
     return
   fi
@@ -403,26 +415,55 @@ ensure_steam_windows_client_in_prefix() {
   log "Installing Steam Windows client into prefix (silent)"
   wine "$installer" /S
 
-  if [ ! -f "$steam_exe" ]; then
-    err "Steam installation completed but steam.exe was not found at $steam_exe"
+  steam_exe="$(resolve_prefix_steam_exe_optional || true)"
+  if [ -z "$steam_exe" ]; then
+    err "Steam installation completed but Steam executable was not found in $steam_dir"
   fi
+}
+
+resolve_prefix_steam_exe_optional() {
+  local steam_base="$WINEPREFIX/drive_c/Program Files (x86)/Steam"
+  local -a candidates=(
+    "$steam_base/Steam.exe"
+    "$steam_base/steam.exe"
+  )
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
 }
 
 warmup_steam_windows_client_in_prefix() {
   export WINEPREFIX="$WINEPREFIX"
   mkdir -p "$WINEPREFIX"
 
-  local steam_exe="$WINEPREFIX/drive_c/Program Files (x86)/Steam/steam.exe"
-  [ -f "$steam_exe" ] || err "Cannot warm up Steam client; missing $steam_exe"
+  local steam_exe
+  steam_exe="$(resolve_prefix_steam_exe_optional || true)"
+  [ -n "$steam_exe" ] || err "Cannot warm up Steam client; missing Steam executable under C:\\Program Files (x86)\\Steam"
 
   local timeout_seconds="$PREFIX_STEAM_TIMEOUT"
   if ! [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || [ "$timeout_seconds" -lt 1 ]; then
     err "Invalid --prefix-steam-timeout value: $timeout_seconds"
   fi
 
-  log "Warming up Steam Windows client in prefix (silent mode, timeout ${timeout_seconds}s)"
+  local -a steam_args=()
+  local mode_label="normal mode"
+  if [ "$PREFIX_STEAM_HEADLESS" -eq 1 ]; then
+    steam_args=(-silent)
+    mode_label="headless mode"
+  fi
+
+  local steam_dir
+  steam_dir="$(dirname "$steam_exe")"
+
+  log "Warming up Steam Windows client in prefix (${mode_label}, timeout ${timeout_seconds}s)"
   (
-    wine "$steam_exe" -silent -noverifyfiles -nobootstrapupdate >/dev/null 2>&1 &
+    cd "$steam_dir"
+    wine "$steam_exe" "${steam_args[@]}" >/dev/null 2>&1 &
     local steam_pid=$!
     sleep "$timeout_seconds"
     kill "$steam_pid" >/dev/null 2>&1 || true
@@ -626,6 +667,7 @@ BACKEND="$BACKEND_DEFAULT"
 BACKEND_SET=0
 PREFIX_STEAM=0
 PREFIX_STEAM_TIMEOUT="${PREFIX_STEAM_TIMEOUT:-15}"
+PREFIX_STEAM_HEADLESS=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -678,6 +720,10 @@ while [ "$#" -gt 0 ]; do
       PREFIX_STEAM_TIMEOUT="$1"
       shift
       ;;
+    --prefix-steam-headless)
+      PREFIX_STEAM_HEADLESS=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -695,6 +741,10 @@ done
 
 if is_truthy "${PREFIX_STEAM:-}"; then
   PREFIX_STEAM=1
+fi
+
+if is_truthy "${PREFIX_STEAM_HEADLESS:-}"; then
+  PREFIX_STEAM_HEADLESS=1
 fi
 
 if [ "$RUN" -ne 1 ]; then
@@ -732,6 +782,9 @@ if [ "$BACKEND" = "distrobox" ]; then
   fi
   if [ "$PREFIX_STEAM" -eq 1 ]; then
     RERUN_ARGS+=(--prefix-steam --prefix-steam-timeout "$PREFIX_STEAM_TIMEOUT")
+    if [ "$PREFIX_STEAM_HEADLESS" -eq 1 ]; then
+      RERUN_ARGS+=(--prefix-steam-headless)
+    fi
   fi
   if [ "${#SETOOLBOX_ARGS[@]}" -gt 0 ]; then
     RERUN_ARGS+=(-- "${SETOOLBOX_ARGS[@]}")
@@ -745,7 +798,7 @@ download_setoolbox_if_needed
 ensure_winetricks_dependencies
 ensure_wine_windows_version
 apply_wine_gdi_patch
-link_steam_install_into_prefix
+link_steamapps_common_into_prefix
 link_spaceengineers_compatdata_into_prefix
 ensure_spaceengineers_registry_keys
 run_setoolbox "${SETOOLBOX_ARGS[@]}"

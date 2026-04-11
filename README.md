@@ -32,17 +32,18 @@ Default paths:
 Options:
 
 ```bash
-./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [--prefix-steam] [--prefix-steam-timeout <seconds>] [-- <setoolbox args>]
+./se-toolbox-wrapper --run [--backend <auto|wine|distrobox>] [--install-new] [--wineprefix <path>] [--setoolbox-dir <path>] [--setoolbox-exe <path>] [--steam-install-dir <path>] [--prefix-steam] [--prefix-steam-timeout <seconds>] [--prefix-steam-headless] [-- <setoolbox args>]
 ```
 
 Default paths:
 - Wine prefix: `./.wine-torch` (shared with Torch by default)
 - Install dir: `./setoolbox`
 - Download asset selection: scans latest release assets for `SEToolbox-*.zip` via GitHub API (falls back to `https://github.com/mmusu3/SEToolbox/releases/latest/download/SEToolbox.zip`)
-- Steam folder linking: auto-detects host Steam install and links it to `C:\Program Files (x86)\Steam` inside the Wine prefix (override with `--steam-install-dir <path>`)
+- Steam app library linking: auto-detects host Steam install and links only `steamapps/common` into `C:\Program Files (x86)\Steam\steamapps\common` inside the Wine prefix (override host root with `--steam-install-dir <path>`). If host Steam or `steamapps/common` is missing, the wrapper just creates/uses a local `C:\Program Files (x86)\Steam\steamapps` directory and does not link or install full Steam.
 - Space Engineers roaming data linking: links `steamapps/compatdata/244850/pfx/drive_c/users/steamuser/AppData/Roaming/SpaceEngineers` into each non-system Wine profile at `{user}\AppData\Roaming\SpaceEngineers`
 - Steam App ID environment: exports `SteamAppId` and `SteamGameId` before launch (defaults to `244850`; override with `STEAM_APP_ID=<id>`)
-- Optional prefix Steam warmup: `--prefix-steam` downloads/installs `SteamSetup.exe` into the Wine prefix (if needed), starts `steam.exe` in silent mode, waits `--prefix-steam-timeout <seconds>` (default `15`), then launches SEToolbox
+- Optional prefix Steam warmup: `--prefix-steam` downloads/installs `SteamSetup.exe` into the Wine prefix (if needed), resolves `Steam.exe` (capitalized) in the prefix, starts Steam in normal mode from its install directory, waits `--prefix-steam-timeout <seconds>` (default `15`), then launches SEToolbox
+- Optional headless prefix Steam warmup: add `--prefix-steam-headless` (or `PREFIX_STEAM_HEADLESS=1`) to launch Steam with `-silent` during warmup instead of normal mode
 
 ## Compatibility behavior
 
