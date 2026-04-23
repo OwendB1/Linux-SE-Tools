@@ -240,7 +240,7 @@ resolve_torch_exe_optional() {
     while IFS= read -r candidate; do
       [ -n "$candidate" ] || continue
       exe_candidates+=("$candidate")
-    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch*.exe' -o -iname '*torch*.exe' \) | sort -f)
+    done < <(find "$TORCH_DIR" -maxdepth 8 -type f \( -iname 'torch.server.exe' -o -iname '*torch.server.exe' \) | sort -f)
   fi
 
   local -A seen=()
