@@ -1,0 +1,1349 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -euo pipefail
+
+APP_NAME="linux-nexus-controller-wrapper"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NEXUS_DIR="$SCRIPT_DIR/nexus-controller/bin"
+NEXUS_ZIP_PATH="$SCRIPT_DIR/nexus-controller.zip"
+NEXUS_DOWNLOAD_URL_BASE="${NEXUS_DOWNLOAD_URL_BASE:-https://api.se-nexus.net/download?license=}"
+DOTNET8_DESKTOP_RUNTIME_URL_DEFAULT="https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe"
+DOTNET8_DESKTOP_RUNTIME_PATH="$SCRIPT_DIR/windowsdesktop-runtime-8-win-x64.exe"
+DOTNET8_MIN_VERSION_DEFAULT="8.0.18"
+WINEPREFIX_DEFAULT="$SCRIPT_DIR/.wine-nexus-controller"
+BACKEND_DEFAULT="auto"
+DISTROBOX_NAME_DEFAULT="linux-nexus-controller-wrapper"
+WINETRICKS_MARKER_NAME=".nexus-controller-wrapper-winetricks-done"
+DOTNET8_MARKER_NAME=".nexus-controller-wrapper-dotnet8-done"
+WINETRICKS_VERBS_DEFAULT="corefonts vcrun2022"
+NEXUS_SQL_DATABASE_DEFAULT="ControllerData"
+NEXUS_SQL_USERNAME_DEFAULT="postgres"
+NEXUS_SQL_PASSWORD_DEFAULT="defaultpass"
+NEXUS_SQL_PORT_DEFAULT="5432"
+
+usage() {
+  cat <<USAGE
+Usage: $(basename "$0") [--run] [--backend <auto|wine|distrobox>] [--install-new] [--license-guid <guid>] [--wineprefix <path>] [--nexus-dir <path>] [--nexus-exe <path>] [--sql-database <name>] [--sql-user <name>] [--sql-password <password>] [--skip-postgres] [-- <controller args>]
+
+Options:
+  --run                  Check/install dependencies, bootstrap Nexus Controller if missing, then run via Wine.
+  --backend <mode>       Runtime backend: auto (default), wine, distrobox.
+  --install-new          Force download/extract into a new instance directory under <nexus-dir>/../instances.
+  --license-guid <guid>  License GUID used to download the controller from SE-Nexus.
+  --wineprefix <path>    Wine prefix path (default: $WINEPREFIX_DEFAULT)
+  --nexus-dir <path>     Nexus Controller bin directory (default: $NEXUS_DIR)
+  --nexus-exe <path>     Explicit path to Nexus Controller executable.
+  --sql-database <name>  Nexus PostgreSQL database name (default: $NEXUS_SQL_DATABASE_DEFAULT).
+  --sql-user <name>      Nexus PostgreSQL login role (default: $NEXUS_SQL_USERNAME_DEFAULT).
+  --sql-password <pass>  Nexus PostgreSQL password (default: $NEXUS_SQL_PASSWORD_DEFAULT).
+  --skip-postgres        Skip native PostgreSQL package install/start on the host.
+  -h, --help             Show help.
+
+Environment:
+  NEXUS_LICENSE_GUID     License GUID fallback for --license-guid.
+  NEXUS_WINETRICKS_VERBS Override default Winetricks verbs (default: "$WINETRICKS_VERBS_DEFAULT").
+  NEXUS_DOTNET8_DESKTOP_RUNTIME_URL
+                        Override .NET 8 Windows Desktop Runtime installer URL.
+  NEXUS_DOTNET8_MIN_VERSION
+                        Minimum required .NET 8 Desktop Runtime version
+                        (default: $DOTNET8_MIN_VERSION_DEFAULT).
+  NEXUS_SQL_DATABASE     PostgreSQL database name written into NexusControlConfig.cfg.
+  NEXUS_SQL_USERNAME     PostgreSQL role written into NexusControlConfig.cfg.
+  NEXUS_SQL_PASSWORD     PostgreSQL password written into NexusControlConfig.cfg.
+
+Examples:
+  ./$(basename "$0") --run --license-guid 01234567-89ab-cdef-0123-456789abcdef
+  NEXUS_LICENSE_GUID=01234567-89ab-cdef-0123-456789abcdef ./$(basename "$0") --run
+USAGE
+}
+
+log() { printf '[%s] %s\n' "$APP_NAME" "$*"; }
+err() { printf '[%s] error: %s\n' "$APP_NAME" "$*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+is_root() { [ "${EUID:-$(id -u)}" -eq 0 ]; }
+
+sudo_can_run_noninteractive() {
+  have sudo || return 1
+  sudo -n true >/dev/null 2>&1
+}
+
+can_attempt_privileged() {
+  if is_root; then
+    return 0
+  fi
+
+  if [ -t 0 ] && [ -t 1 ] && have sudo; then
+    return 0
+  fi
+
+  sudo_can_run_noninteractive
+}
+
+run_privileged_quiet() {
+  if is_root; then
+    "$@" >/dev/null 2>&1
+  else
+    have sudo || return 1
+
+    if [ -t 0 ] && [ -t 1 ]; then
+      sudo "$@" >/dev/null 2>&1
+    elif sudo_can_run_noninteractive; then
+      sudo -n "$@" >/dev/null 2>&1
+    else
+      return 1
+    fi
+  fi
+}
+
+run_privileged() {
+  if is_root; then
+    "$@"
+  else
+    have sudo || err "Need root or sudo for privileged system action: $*"
+
+    if [ -t 0 ] && [ -t 1 ]; then
+      sudo "$@"
+    elif sudo_can_run_noninteractive; then
+      sudo -n "$@"
+    else
+      err "Need root privileges for system action, but sudo cannot prompt in this non-interactive shell: $*"
+    fi
+  fi
+}
+
+run_as_postgres() {
+  if have runuser; then
+    if is_root; then
+      runuser -u postgres -- "$@"
+    else
+      run_privileged runuser -u postgres -- "$@"
+    fi
+    return
+  fi
+
+  if have sudo; then
+    sudo -u postgres "$@"
+    return
+  fi
+
+  err "Need runuser or sudo to execute PostgreSQL initialization as postgres user."
+}
+
+quote_sql_literal() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed "s/'/''/g")"
+  printf "'%s'" "$escaped"
+}
+
+quote_sql_identifier() {
+  local escaped
+  escaped="$(printf '%s' "$1" | sed 's/"/""/g')"
+  printf '"%s"' "$escaped"
+}
+
+xml_escape_text() {
+  local value="$1"
+  value="${value//&/&amp;}"
+  value="${value//</&lt;}"
+  value="${value//>/&gt;}"
+  value="${value//\"/&quot;}"
+  value="${value//\'/&apos;}"
+  printf '%s\n' "$value"
+}
+
+escape_sed_replacement() {
+  printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+detect_pm() {
+  if have apt-get; then echo apt; return; fi
+  if have dnf; then echo dnf; return; fi
+  if have yum; then echo yum; return; fi
+  if have pacman; then echo pacman; return; fi
+  if have zypper; then echo zypper; return; fi
+  echo ""
+}
+
+install_linux_dependencies() {
+  local pm="$1"
+  log "Installing runtime dependencies with $pm"
+  case "$pm" in
+    apt)
+      run_privileged dpkg --add-architecture i386
+      run_privileged apt-get update
+      run_privileged apt-get install -y wine64 wine32 winetricks curl unzip cabextract
+      ;;
+    dnf)
+      run_privileged dnf install -y wine winetricks curl unzip cabextract
+      ;;
+    yum)
+      run_privileged yum install -y wine winetricks curl unzip cabextract
+      ;;
+    pacman)
+      run_privileged pacman -Sy --noconfirm wine winetricks curl unzip cabextract
+      ;;
+    zypper)
+      run_privileged zypper --non-interactive install wine winetricks curl unzip cabextract
+      ;;
+    *)
+      err "Unsupported package manager. Install wine, winetricks, curl, unzip, cabextract manually."
+      ;;
+  esac
+}
+
+install_postgres_packages() {
+  local pm="$1"
+  log "Installing PostgreSQL packages with $pm"
+  case "$pm" in
+    apt)
+      run_privileged apt-get update
+      run_privileged apt-get install -y postgresql
+      ;;
+    dnf)
+      run_privileged dnf install -y postgresql-server postgresql
+      ;;
+    yum)
+      run_privileged yum install -y postgresql-server postgresql
+      ;;
+    pacman)
+      run_privileged pacman -Sy --noconfirm postgresql
+      ;;
+    zypper)
+      run_privileged zypper --non-interactive install postgresql-server postgresql
+      ;;
+    *)
+      err "Unsupported package manager. Install PostgreSQL manually or rerun with --skip-postgres."
+      ;;
+  esac
+}
+
+postgres_packages_missing() {
+  local cmd
+  for cmd in psql pg_isready; do
+    if ! have "$cmd"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+path_exists_maybe_privileged() {
+  local path="$1"
+  [ -e "$path" ] || run_privileged_quiet test -e "$path"
+}
+
+postgres_data_dir_looks_initialized() {
+  local data_dir="$1"
+  path_exists_maybe_privileged "$data_dir" || return 1
+
+  if path_exists_maybe_privileged "$data_dir/PG_VERSION"; then
+    return 0
+  fi
+
+  if have pg_controldata; then
+    if pg_controldata "$data_dir" >/dev/null 2>&1 || run_privileged_quiet pg_controldata "$data_dir"; then
+      return 0
+    fi
+  fi
+
+  local rel_path
+  for rel_path in base global pg_wal postgresql.conf pg_hba.conf; do
+    path_exists_maybe_privileged "$data_dir/$rel_path" || return 1
+  done
+
+  return 0
+}
+
+find_postgres_cluster_data_dir() {
+  local pm="${1:-}"
+  local -a roots=()
+
+  case "$pm" in
+    apt)
+      roots=(/var/lib/postgresql)
+      ;;
+    pacman)
+      roots=(/var/lib/postgres)
+      ;;
+    dnf|yum|zypper)
+      roots=(/var/lib/pgsql /var/lib/postgresql)
+      ;;
+    *)
+      roots=(/var/lib/pgsql /var/lib/postgresql /var/lib/postgres)
+      ;;
+  esac
+
+  local root
+  for root in "${roots[@]}"; do
+    [ -d "$root" ] || continue
+
+    # Prefer canonical paths first.
+    if postgres_data_dir_looks_initialized "$root/data"; then
+      printf '%s/data\n' "$root"
+      return
+    fi
+
+    # Support versioned layouts like /var/lib/pgsql/17/data.
+    local found
+    while IFS= read -r found; do
+      [ -n "$found" ] || continue
+      if postgres_data_dir_looks_initialized "$found"; then
+        printf '%s\n' "$found"
+        return
+      fi
+    done < <(find "$root" -mindepth 2 -maxdepth 4 -type d -name data -print 2>/dev/null | sort)
+  done
+}
+
+postgres_cluster_initialized() {
+  local pm="$1"
+  [ -n "$(find_postgres_cluster_data_dir "$pm" || true)" ]
+}
+
+resolve_postgres_data_dir() {
+  local pm="$1"
+  find_postgres_cluster_data_dir "$pm"
+}
+
+resolve_postgres_log_path() {
+  local data_dir="$1"
+  [ -n "$data_dir" ] || return 1
+  printf '%s/logfile\n' "$(dirname "$data_dir")"
+}
+
+start_postgres_via_pg_ctl() {
+  local pm="$1"
+  have pg_ctl || return 1
+
+  local data_dir
+  data_dir="$(resolve_postgres_data_dir "$pm" || true)"
+  [ -n "$data_dir" ] || return 1
+  postgres_data_dir_looks_initialized "$data_dir" || return 1
+
+  local log_path
+  log_path="$(resolve_postgres_log_path "$data_dir")"
+
+  log "Starting PostgreSQL cluster via pg_ctl: $data_dir"
+  run_as_postgres pg_ctl -D "$data_dir" -l "$log_path" start
+}
+
+print_postgres_manual_steps() {
+  local pm="$1"
+  local need_install="$2"
+  local need_init="$3"
+  local need_start="$4"
+
+  printf '[%s] %s\n' "$APP_NAME" "Cannot auto-manage PostgreSQL from current shell. Run these manually:" >&2
+  case "$pm" in
+    apt)
+      if [ "$need_install" -eq 1 ]; then
+        printf '[%s]   sudo apt-get update\n' "$APP_NAME" >&2
+        printf '[%s]   sudo apt-get install -y postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_start" -eq 1 ]; then
+        printf '[%s]   sudo systemctl enable --now postgresql\n' "$APP_NAME" >&2
+      fi
+      ;;
+    dnf)
+      if [ "$need_install" -eq 1 ]; then
+        printf '[%s]   sudo dnf install -y postgresql-server postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_init" -eq 1 ]; then
+        printf '[%s]   sudo postgresql-setup --initdb --unit postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_start" -eq 1 ]; then
+        printf '[%s]   sudo systemctl enable --now postgresql\n' "$APP_NAME" >&2
+        printf '[%s]   sudo -u postgres /usr/bin/pg_ctl -D /var/lib/pgsql/data -l /var/lib/pgsql/logfile start\n' "$APP_NAME" >&2
+      fi
+      ;;
+    yum)
+      if [ "$need_install" -eq 1 ]; then
+        printf '[%s]   sudo yum install -y postgresql-server postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_init" -eq 1 ]; then
+        printf '[%s]   sudo postgresql-setup --initdb --unit postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_start" -eq 1 ]; then
+        printf '[%s]   sudo systemctl enable --now postgresql\n' "$APP_NAME" >&2
+        printf '[%s]   sudo -u postgres /usr/bin/pg_ctl -D /var/lib/pgsql/data -l /var/lib/pgsql/logfile start\n' "$APP_NAME" >&2
+      fi
+      ;;
+    pacman)
+      if [ "$need_install" -eq 1 ]; then
+        printf '[%s]   sudo pacman -Sy --noconfirm postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_init" -eq 1 ]; then
+        printf '[%s]   sudo install -d -m 700 -o postgres -g postgres /var/lib/postgres\n' "$APP_NAME" >&2
+        printf '[%s]   sudo install -d -m 700 -o postgres -g postgres /var/lib/postgres/data\n' "$APP_NAME" >&2
+        printf '[%s]   sudo -u postgres initdb -D /var/lib/postgres/data\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_start" -eq 1 ]; then
+        printf '[%s]   sudo systemctl enable --now postgresql\n' "$APP_NAME" >&2
+        printf '[%s]   sudo -u postgres /usr/bin/pg_ctl -D /var/lib/postgres/data -l /var/lib/postgres/logfile start\n' "$APP_NAME" >&2
+      fi
+      ;;
+    zypper)
+      if [ "$need_install" -eq 1 ]; then
+        printf '[%s]   sudo zypper --non-interactive install postgresql-server postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_init" -eq 1 ]; then
+        printf '[%s]   sudo postgresql-setup --initdb --unit postgresql\n' "$APP_NAME" >&2
+      fi
+      if [ "$need_start" -eq 1 ]; then
+        printf '[%s]   sudo systemctl enable --now postgresql\n' "$APP_NAME" >&2
+        printf '[%s]   sudo -u postgres /usr/bin/pg_ctl -D /var/lib/pgsql/data -l /var/lib/pgsql/logfile start\n' "$APP_NAME" >&2
+      fi
+      ;;
+    *)
+      printf '[%s]   Install PostgreSQL packages, initialize cluster, then start service manually.\n' "$APP_NAME" >&2
+      ;;
+  esac
+  printf '[%s]   Or rerun wrapper with --skip-postgres after PostgreSQL is ready.\n' "$APP_NAME" >&2
+}
+
+dir_has_entries() {
+  local dir="$1"
+  [ -d "$dir" ] || return 1
+  find "$dir" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+show_postgres_init_log_tail() {
+  local log_path="$1"
+  [ -f "$log_path" ] || return 0
+
+  printf '[%s] %s\n' "$APP_NAME" "Recent PostgreSQL init log ($log_path):" >&2
+  tail -n 20 "$log_path" >&2 || true
+}
+
+fail_postgres_stale_data_dir() {
+  local data_dir="$1"
+  local log_path="$2"
+  local backup_path="${data_dir}.wrapper-stale-$(date +%Y%m%d-%H%M%S)"
+
+  show_postgres_init_log_tail "$log_path"
+  {
+    printf '[%s] error: PostgreSQL data directory is not a valid initialized cluster: %s\n' "$APP_NAME" "$data_dir"
+    printf '[%s] error: Directory is non-empty but wrapper could not validate it as initialized. Previous init may have failed.\n' "$APP_NAME"
+    printf '[%s] error: Fix stale directory, then rerun. Example:\n' "$APP_NAME"
+    printf '[%s] error:   sudo mv %s %s\n' "$APP_NAME" "$data_dir" "$backup_path"
+    printf '[%s] error: If you saw /var/lib/pgsql/.config \"Not a directory\", also rename/remove that file before retry.\n' "$APP_NAME"
+  } >&2
+  exit 1
+}
+
+ensure_postgres_home_dir_ready() {
+  local postgres_home="$1"
+  local bad_config_path="$postgres_home/.config"
+
+  if [ -f "$bad_config_path" ]; then
+    err "Detected file at $bad_config_path. PostgreSQL init expects that path to be absent or a directory. Rename or remove it, then rerun."
+  fi
+}
+
+ensure_postgres_data_dir_ready_for_init() {
+  local data_dir="$1"
+  local log_path="$2"
+
+  if postgres_data_dir_looks_initialized "$data_dir"; then
+    return 0
+  fi
+
+  if dir_has_entries "$data_dir"; then
+    fail_postgres_stale_data_dir "$data_dir" "$log_path"
+  fi
+}
+
+run_postgresql_setup_initdb() {
+  local setup_bin="$1"
+  local data_dir="$2"
+  local log_path="$3"
+  local -a cmd=(env -i PATH="$PATH" HOME=/root USER=root LOGNAME=root)
+
+  if [ -n "${LANG:-}" ]; then
+    cmd+=(LANG="$LANG")
+  fi
+  if [ -n "${LC_ALL:-}" ]; then
+    cmd+=(LC_ALL="$LC_ALL")
+  fi
+  cmd+=("$setup_bin" --initdb --unit postgresql)
+
+  log "Initializing PostgreSQL cluster via $(basename "$setup_bin") --unit postgresql"
+  if run_privileged "${cmd[@]}"; then
+    return 0
+  fi
+
+  if [ -f "$data_dir/PG_VERSION" ]; then
+    return 0
+  fi
+
+  fail_postgres_stale_data_dir "$data_dir" "$log_path"
+}
+
+is_immutable_os() {
+  if [ -f /run/ostree-booted ]; then
+    return 0
+  fi
+
+  if [ -f /run/.containerenv ]; then
+    return 1
+  fi
+
+  if have rpm-ostree; then
+    return 0
+  fi
+
+  if have transactional-update; then
+    return 0
+  fi
+
+  local os_release_file=""
+  if [ -r /etc/os-release ]; then
+    os_release_file="/etc/os-release"
+  elif [ -r /usr/lib/os-release ]; then
+    os_release_file="/usr/lib/os-release"
+  fi
+
+  if [ -n "$os_release_file" ]; then
+    if grep -Eiq '(silverblue|kinoite|sericea|onyx|coreos|microos|aeon|atomic|immutable|ostree|bootc|bazzite|bluefin|aurora|ublue|ucore)' "$os_release_file"; then
+      return 0
+    fi
+
+    local os_release_tokens
+    os_release_tokens="$(
+      sed -nE "s/^(ID|ID_LIKE|VARIANT|VARIANT_ID|IMAGE_ID|NAME|PRETTY_NAME)=[\"']?([^\"']+)[\"']?/\2/p" "$os_release_file" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr ' -' '\n'
+    )"
+    if printf '%s\n' "$os_release_tokens" | grep -Eq '(atomic|immutable|ostree|bootc|silverblue|kinoite|sericea|onyx|coreos|microos|aeon|bazzite|bluefin|aurora|ublue|ucore)'; then
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+select_backend_for_auto() {
+  if is_immutable_os; then
+    printf '[%s] %s\n' "$APP_NAME" "Detected immutable OS; defaulting backend to distrobox." >&2
+    printf 'distrobox\n'
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    log "Choose runtime backend:"
+    printf '  1) wine (run directly on current system)\n' >&2
+    printf '  2) distrobox (run inside distrobox container)\n' >&2
+
+    local choice
+    while true; do
+      printf 'Select backend [1-2, default 1]: ' >&2
+      IFS= read -r choice || break
+      case "$choice" in
+        ""|1|wine)
+          printf 'wine\n'
+          return
+          ;;
+        2|distrobox)
+          printf 'distrobox\n'
+          return
+          ;;
+        *)
+          printf 'Invalid selection. Enter 1 or 2.\n' >&2
+          ;;
+      esac
+    done
+  fi
+
+  printf '[%s] %s\n' "$APP_NAME" "Non-interactive auto mode; defaulting backend to wine." >&2
+  printf 'wine\n'
+}
+
+ensure_linux_dependencies() {
+  local missing=0
+  local cmd
+  for cmd in wine winetricks curl unzip; do
+    if ! have "$cmd"; then
+      missing=1
+      break
+    fi
+  done
+
+  if [ "$missing" -eq 1 ]; then
+    if is_immutable_os; then
+      err "Missing runtime dependencies on an immutable OS. Use --backend distrobox."
+    fi
+    install_linux_dependencies "$(detect_pm)"
+  else
+    log "Linux runtime dependencies already installed."
+  fi
+}
+
+ensure_winetricks_dependencies() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local marker="$WINEPREFIX/$WINETRICKS_MARKER_NAME"
+  if [ -f "$marker" ]; then
+    log "Winetricks bootstrap already completed for this prefix."
+    return
+  fi
+
+  local verbs_raw="${NEXUS_WINETRICKS_VERBS:-$WINETRICKS_VERBS_DEFAULT}"
+  local -a verbs=()
+  if [ -n "$verbs_raw" ]; then
+    # Intentional word splitting for Winetricks verbs list.
+    read -r -a verbs <<< "$verbs_raw"
+  fi
+
+  log "Initializing Wine prefix"
+  wineboot -u
+
+  if [ "${#verbs[@]}" -gt 0 ]; then
+    log "Bootstrapping Winetricks dependencies in $WINEPREFIX: ${verbs[*]}"
+    winetricks -q "${verbs[@]}"
+  else
+    log "Skipping Winetricks verbs because NEXUS_WINETRICKS_VERBS is empty."
+  fi
+
+  touch "$marker"
+}
+
+ensure_wine_windows_version() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  log "Setting Wine Windows version override to Windows 10"
+  wine reg add "HKCU\\Software\\Wine\\Version" /v Version /t REG_SZ /d win10 /f >/dev/null
+}
+
+version_ge() {
+  local lhs="${1:-0}"
+  local rhs="${2:-0}"
+  [ "$(printf '%s\n%s\n' "$rhs" "$lhs" | sort -V | head -n1)" = "$rhs" ]
+}
+
+find_nexus_dotnet8_runtime_version() {
+  local dotnet_root
+  local -a versions=()
+  for dotnet_root in \
+    "$WINEPREFIX/drive_c/Program Files/dotnet/shared/Microsoft.WindowsDesktop.App" \
+    "$WINEPREFIX/drive_c/Program Files (x86)/dotnet/shared/Microsoft.WindowsDesktop.App"; do
+    if [ -d "$dotnet_root" ]; then
+      while IFS= read -r version_dir; do
+        [ -n "$version_dir" ] || continue
+        versions+=("$(basename "$version_dir")")
+      done < <(find "$dotnet_root" -mindepth 1 -maxdepth 1 -type d -name '8.*' | sort -V)
+    fi
+  done
+
+  [ "${#versions[@]}" -gt 0 ] || return 1
+  printf '%s\n' "${versions[@]}" | sort -V | tail -n1
+}
+
+find_nexus_dotnet_hostfxr_version() {
+  local hostfxr_root
+  local -a versions=()
+  for hostfxr_root in \
+    "$WINEPREFIX/drive_c/Program Files/dotnet/host/fxr" \
+    "$WINEPREFIX/drive_c/Program Files (x86)/dotnet/host/fxr"; do
+    if [ -d "$hostfxr_root" ]; then
+      while IFS= read -r version_dir; do
+        [ -f "$version_dir/hostfxr.dll" ] || continue
+        versions+=("$(basename "$version_dir")")
+      done < <(find "$hostfxr_root" -mindepth 1 -maxdepth 1 -type d | sort -V)
+    fi
+  done
+
+  [ "${#versions[@]}" -gt 0 ] || return 1
+  printf '%s\n' "${versions[@]}" | sort -V | tail -n1
+}
+
+have_nexus_dotnet_hostfxr() {
+  local hostfxr_version
+  hostfxr_version="$(find_nexus_dotnet_hostfxr_version || true)"
+  [ -n "$hostfxr_version" ]
+}
+
+have_nexus_dotnet8_runtime() {
+  local min_version="${1:-$DOTNET8_MIN_VERSION_DEFAULT}"
+  local installed_version
+  installed_version="$(find_nexus_dotnet8_runtime_version || true)"
+  [ -n "$installed_version" ] || return 1
+  version_ge "$installed_version" "$min_version"
+}
+
+ensure_nexus_dotnet8_runtime() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  local min_version="${NEXUS_DOTNET8_MIN_VERSION:-$DOTNET8_MIN_VERSION_DEFAULT}"
+
+  local marker="$WINEPREFIX/$DOTNET8_MARKER_NAME"
+  if [ -f "$marker" ] && have_nexus_dotnet8_runtime "$min_version" && have_nexus_dotnet_hostfxr; then
+    log ".NET 8 Windows Desktop Runtime >= $min_version already present in this prefix."
+    return
+  fi
+
+  local installed_version
+  installed_version="$(find_nexus_dotnet8_runtime_version || true)"
+  if [ -n "$installed_version" ] && version_ge "$installed_version" "$min_version" && have_nexus_dotnet_hostfxr; then
+    touch "$marker"
+    log ".NET 8 Windows Desktop Runtime $installed_version already detected in this prefix."
+    return
+  fi
+
+  if [ -n "$installed_version" ]; then
+    log "Detected .NET 8 Windows Desktop Runtime $installed_version, but Nexus requires >= $min_version. Upgrading."
+  fi
+
+  local runtime_url="${NEXUS_DOTNET8_DESKTOP_RUNTIME_URL:-$DOTNET8_DESKTOP_RUNTIME_URL_DEFAULT}"
+  log "Downloading .NET 8 Windows Desktop Runtime from $runtime_url"
+  rm -f "$DOTNET8_DESKTOP_RUNTIME_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$DOTNET8_DESKTOP_RUNTIME_PATH" "$runtime_url"
+
+  log "Installing .NET 8 Windows Desktop Runtime into Wine prefix"
+  wine start /wait /unix "$DOTNET8_DESKTOP_RUNTIME_PATH" /install /quiet /norestart
+
+  local hostfxr_version
+  installed_version="$(find_nexus_dotnet8_runtime_version || true)"
+  hostfxr_version="$(find_nexus_dotnet_hostfxr_version || true)"
+  have_nexus_dotnet8_runtime "$min_version" || err ".NET 8 Windows Desktop Runtime installer completed but detected version '${installed_version:-none}' is still below required minimum $min_version in $WINEPREFIX"
+  [ -n "$hostfxr_version" ] || err ".NET 8 Windows Desktop Runtime installer completed but no Windows hostfxr.dll was detected in $WINEPREFIX"
+  touch "$marker"
+  log ".NET 8 Windows Desktop Runtime $installed_version installed with hostfxr $hostfxr_version."
+}
+
+apply_wine_gdi_patch() {
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+
+  # WPF/WinForms UIs are usually more stable on Wine with the GDI renderer.
+  log "Applying Wine graphics patch: Direct3D renderer = gdi"
+  wine reg add "HKCU\\Software\\Wine\\Direct3D" /v renderer /t REG_SZ /d gdi /f >/dev/null
+}
+
+is_guid() {
+  [[ "${1:-}" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]]
+}
+
+mask_guid() {
+  local guid="${1:-}"
+  if [ "${#guid}" -le 12 ]; then
+    printf '***\n'
+    return
+  fi
+
+  printf '%s...%s\n' "${guid:0:8}" "${guid: -4}"
+}
+
+resolve_license_guid_optional() {
+  local guid="${LICENSE_GUID:-${NEXUS_LICENSE_GUID:-}}"
+  if [ -z "$guid" ]; then
+    return
+  fi
+
+  is_guid "$guid" || err "License GUID must match xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  printf '%s\n' "$guid"
+}
+
+resolve_license_guid_required() {
+  local guid
+  guid="$(resolve_license_guid_optional || true)"
+  [ -n "$guid" ] || err "Download requires --license-guid <GUID> or NEXUS_LICENSE_GUID"
+  printf '%s\n' "$guid"
+}
+
+resolve_nexus_exe_optional() {
+  if [ -n "$NEXUS_EXE" ] && [ -f "$NEXUS_EXE" ]; then
+    printf '%s\n' "$NEXUS_EXE"
+    return
+  fi
+
+  local -a exe_candidates=()
+  local candidate
+  for candidate in \
+    "$NEXUS_DIR/Nexus Controller.exe" \
+    "$NEXUS_DIR/NexusController.exe" \
+    "$NEXUS_DIR/NGController.exe" \
+    "$NEXUS_DIR/Nexus.exe" \
+    "$NEXUS_DIR/Controller.exe"; do
+    if [ -f "$candidate" ]; then
+      exe_candidates+=("$candidate")
+    fi
+  done
+
+  if [ -d "$NEXUS_DIR" ]; then
+    while IFS= read -r candidate; do
+      [ -n "$candidate" ] || continue
+      exe_candidates+=("$candidate")
+    done < <(find "$NEXUS_DIR" -maxdepth 8 -type f \( -iname '*nexus*controller*.exe' -o -iname 'ngcontroller.exe' -o -iname '*nexus*.exe' -o -iname '*controller*.exe' \) | sort -f)
+  fi
+
+  local -A seen=()
+  local -a unique_candidates=()
+  for candidate in "${exe_candidates[@]}"; do
+    local basename_lower
+    basename_lower="$(basename "$candidate" | tr '[:upper:]' '[:lower:]')"
+    case "$basename_lower" in
+      *updater*.exe|*update*.exe|*installer*.exe|*setup*.exe|unins*.exe)
+        continue
+        ;;
+    esac
+
+    if [ -z "${seen[$candidate]+x}" ]; then
+      seen["$candidate"]=1
+      unique_candidates+=("$candidate")
+    fi
+  done
+
+  local total="${#unique_candidates[@]}"
+  if [ "$total" -eq 0 ]; then
+    return
+  fi
+
+  if [ "$total" -eq 1 ]; then
+    printf '%s\n' "${unique_candidates[0]}"
+    return
+  fi
+
+  if [ -t 0 ] && [ -t 1 ]; then
+    printf '[%s] %s\n' "$APP_NAME" "Multiple Nexus Controller executables detected. Select one to run:" >&2
+    local i
+    for i in "${!unique_candidates[@]}"; do
+      printf '  %d) %s\n' "$((i + 1))" "${unique_candidates[$i]}" >&2
+    done
+
+    local choice
+    while true; do
+      printf 'Enter selection [1-%d]: ' "$total" >&2
+      IFS= read -r choice || break
+      if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$total" ]; then
+        printf '%s\n' "${unique_candidates[$((choice - 1))]}"
+        return
+      fi
+      printf 'Invalid selection. Please choose a number between 1 and %d.\n' "$total" >&2
+    done
+  fi
+
+  printf '[%s] %s\n' "$APP_NAME" "Multiple Nexus Controller executables detected in non-interactive mode; defaulting to: ${unique_candidates[0]}" >&2
+  printf '%s\n' "${unique_candidates[0]}"
+}
+
+download_nexus() {
+  local target_dir="$1"
+  local license_guid
+  local masked_guid
+  local download_url
+
+  license_guid="$(resolve_license_guid_required)"
+  masked_guid="$(mask_guid "$license_guid")"
+  download_url="${NEXUS_DOWNLOAD_URL_BASE}${license_guid}"
+
+  log "Downloading Nexus Controller with license $masked_guid"
+  rm -f "$NEXUS_ZIP_PATH"
+  curl -fL --retry 3 --retry-delay 2 -o "$NEXUS_ZIP_PATH" "$download_url"
+
+  mkdir -p "$target_dir"
+  unzip -oq "$NEXUS_ZIP_PATH" -d "$target_dir"
+  log "Nexus Controller extracted to $target_dir"
+}
+
+download_nexus_if_needed() {
+  local exe
+  exe="$(resolve_nexus_exe_optional || true)"
+  if [ "$INSTALL_NEW" -eq 0 ] && [ -n "$exe" ]; then
+    log "Detected existing Nexus Controller executable at $exe; skipping download."
+    return
+  fi
+
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    local nexus_root_dir
+    local instance_dir
+    nexus_root_dir="$(dirname "$NEXUS_DIR")"
+    instance_dir="$nexus_root_dir/instances/nexus-controller-$(date +%Y%m%d-%H%M%S)/bin"
+    download_nexus "$instance_dir"
+    NEXUS_DIR="$instance_dir"
+    NEXUS_EXE=""
+    NEXUS_EXE="$(resolve_nexus_exe_optional || true)"
+    [ -n "$NEXUS_EXE" ] || err "Nexus Controller download completed but no executable was found in $instance_dir"
+    return
+  fi
+
+  download_nexus "$NEXUS_DIR"
+}
+
+resolve_nexus_exe_required() {
+  local exe
+  exe="$(resolve_nexus_exe_optional || true)"
+  [ -n "$exe" ] || err "Unable to locate Nexus Controller executable in $NEXUS_DIR"
+  printf '%s\n' "$exe"
+}
+
+ensure_postgres_cluster_initialized() {
+  local pm="$1"
+  local existing_data_dir
+  existing_data_dir="$(resolve_postgres_data_dir "$pm" || true)"
+  if [ -n "$existing_data_dir" ] && postgres_data_dir_looks_initialized "$existing_data_dir"; then
+    log "Detected existing PostgreSQL cluster at $existing_data_dir; skipping init."
+    return
+  fi
+
+  case "$pm" in
+    apt)
+      return
+      ;;
+    dnf|yum)
+      ensure_postgres_home_dir_ready "/var/lib/pgsql"
+      ensure_postgres_data_dir_ready_for_init "/var/lib/pgsql/data" "/var/lib/pgsql/initdb_postgresql.log"
+      if have postgresql-setup; then
+        run_postgresql_setup_initdb postgresql-setup "/var/lib/pgsql/data" "/var/lib/pgsql/initdb_postgresql.log"
+        return
+      fi
+      if [ -x /usr/bin/postgresql-setup ]; then
+        run_postgresql_setup_initdb /usr/bin/postgresql-setup "/var/lib/pgsql/data" "/var/lib/pgsql/initdb_postgresql.log"
+        return
+      fi
+      log "Could not find postgresql-setup; skipping automatic PostgreSQL init."
+      ;;
+    pacman)
+      ensure_postgres_data_dir_ready_for_init "/var/lib/postgres/data" "/var/lib/postgres/initdb.log"
+      if ! have initdb; then
+        log "Could not find initdb; skipping automatic PostgreSQL init."
+        return
+      fi
+      log "Initializing PostgreSQL cluster under /var/lib/postgres/data"
+      run_privileged install -d -m 700 -o postgres -g postgres /var/lib/postgres
+      run_privileged install -d -m 700 -o postgres -g postgres /var/lib/postgres/data
+      run_as_postgres initdb -D /var/lib/postgres/data
+      ;;
+    zypper)
+      local data_dir="/var/lib/pgsql/data"
+      local log_path="/var/lib/pgsql/initdb_postgresql.log"
+      ensure_postgres_home_dir_ready "/var/lib/pgsql"
+      if [ -f /var/lib/pgsql/data/PG_VERSION ] || [ -f /var/lib/postgresql/data/PG_VERSION ]; then
+        return
+      fi
+      if [ ! -d /var/lib/pgsql/data ] && [ -d /var/lib/postgresql/data ]; then
+        data_dir="/var/lib/postgresql/data"
+        log_path="/var/lib/postgresql/initdb_postgresql.log"
+      fi
+      ensure_postgres_data_dir_ready_for_init "$data_dir" "$log_path"
+      if have postgresql-setup; then
+        run_postgresql_setup_initdb postgresql-setup "$data_dir" "$log_path"
+        return
+      fi
+      log "Could not find postgresql-setup; skipping automatic PostgreSQL init."
+      ;;
+  esac
+}
+
+find_postgres_service_name() {
+  if ! have systemctl; then
+    return
+  fi
+
+  local unit
+  for unit in postgresql postgresql.service postgresql-17 postgresql-16 postgresql-15 postgresql-14 postgresql-13 postgresql-12; do
+    if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q .; then
+      printf '%s\n' "$unit"
+      return
+    fi
+  done
+
+  local discovered
+  discovered="$(systemctl list-unit-files 'postgresql*' 'postgres*' --type=service --no-legend 2>/dev/null | awk 'NF {print $1}' | head -n1 || true)"
+  if [ -n "$discovered" ]; then
+    printf '%s\n' "$discovered"
+  fi
+}
+
+ensure_nexus_postgres_role_and_database() {
+  local username_literal
+  local username_ident
+  local password_literal
+  local database_literal
+  local database_ident
+  local database_exists=0
+
+  if ! have psql; then
+    err "psql is required to provision the Nexus PostgreSQL role and database."
+  fi
+
+  if have pg_isready; then
+    pg_isready -q -p "$SQL_PORT" || err "PostgreSQL is not accepting connections on port $SQL_PORT."
+  fi
+
+  username_literal="$(quote_sql_literal "$SQL_USERNAME")"
+  username_ident="$(quote_sql_identifier "$SQL_USERNAME")"
+  password_literal="$(quote_sql_literal "$SQL_PASSWORD")"
+  database_literal="$(quote_sql_literal "$SQL_DATABASE")"
+  database_ident="$(quote_sql_identifier "$SQL_DATABASE")"
+
+  log "Ensuring PostgreSQL role '$SQL_USERNAME' exists and has the configured password."
+  run_as_postgres psql -v ON_ERROR_STOP=1 -p "$SQL_PORT" -d postgres -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $username_literal) THEN CREATE ROLE $username_ident LOGIN PASSWORD $password_literal; ELSE ALTER ROLE $username_ident WITH LOGIN PASSWORD $password_literal; END IF; END \$\$;"
+
+  if run_as_postgres psql -At -p "$SQL_PORT" -d postgres -c "SELECT 1 FROM pg_database WHERE datname = $database_literal;" | grep -qx '1'; then
+    database_exists=1
+  fi
+
+  if [ "$database_exists" -eq 1 ]; then
+    log "PostgreSQL database '$SQL_DATABASE' already exists; ensuring ownership stays with '$SQL_USERNAME'."
+    run_as_postgres psql -v ON_ERROR_STOP=1 -p "$SQL_PORT" -d postgres -c "ALTER DATABASE $database_ident OWNER TO $username_ident;"
+  else
+    log "Creating PostgreSQL database '$SQL_DATABASE' owned by '$SQL_USERNAME'."
+    run_as_postgres psql -v ON_ERROR_STOP=1 -p "$SQL_PORT" -d postgres -c "CREATE DATABASE $database_ident OWNER $username_ident;"
+  fi
+}
+
+ensure_system_postgres() {
+  if [ "$SKIP_POSTGRES" -eq 1 ]; then
+    log "Skipping native PostgreSQL install/start on host."
+    return
+  fi
+
+  local pm
+  pm="$(detect_pm)"
+
+  local need_install=0
+  local need_init=0
+  local need_start=0
+  if postgres_packages_missing; then
+    need_install=1
+  fi
+  if ! postgres_cluster_initialized "$pm"; then
+    need_init=1
+  fi
+  if ! have pg_isready || ! pg_isready -q -p "$SQL_PORT"; then
+    need_start=1
+  fi
+
+  if [ "$need_install" -eq 1 ] || [ "$need_init" -eq 1 ] || [ "$need_start" -eq 1 ]; then
+    if ! can_attempt_privileged; then
+      print_postgres_manual_steps "$pm" "$need_install" "$need_init" "$need_start"
+      err "PostgreSQL setup needs root/sudo access that is not available in this shell."
+    fi
+  fi
+
+  if [ "$need_install" -eq 1 ]; then
+    install_postgres_packages "$pm"
+  else
+    log "PostgreSQL packages already installed."
+  fi
+
+  ensure_postgres_cluster_initialized "$pm"
+
+  local postgres_unit
+  postgres_unit="$(find_postgres_service_name || true)"
+  local started=0
+  if [ -z "$postgres_unit" ]; then
+    log "Could not detect PostgreSQL systemd service automatically."
+  else
+    log "Enabling and starting PostgreSQL service: $postgres_unit"
+    if run_privileged systemctl enable --now "$postgres_unit"; then
+      started=1
+    else
+      log "Automatic PostgreSQL service start failed for $postgres_unit. Trying pg_ctl fallback."
+    fi
+  fi
+
+  if [ "$started" -eq 0 ] && have pg_isready && pg_isready -q -p "$SQL_PORT"; then
+    started=1
+  fi
+
+  if [ "$started" -eq 0 ]; then
+    if start_postgres_via_pg_ctl "$pm"; then
+      sleep 1
+      started=1
+    else
+      log "pg_ctl fallback did not start PostgreSQL automatically. Start it manually before configuring SQL in controller."
+    fi
+  fi
+
+  if have pg_isready; then
+    if pg_isready -q -p "$SQL_PORT"; then
+      log "PostgreSQL is accepting connections on port $SQL_PORT."
+    else
+      log "PostgreSQL installed but not yet ready on port $SQL_PORT. Finish init/start before SQL setup in controller."
+    fi
+  fi
+}
+
+resolve_nexus_root_dir_optional() {
+  local exe
+
+  if [ -n "$NEXUS_EXE" ] && [ -f "$NEXUS_EXE" ]; then
+    (cd "$(dirname "$NEXUS_EXE")/.." && pwd)
+    return
+  fi
+
+  exe="$(resolve_nexus_exe_optional || true)"
+  if [ -n "$exe" ]; then
+    (cd "$(dirname "$exe")/.." && pwd)
+    return
+  fi
+
+  if [ -d "$NEXUS_DIR" ]; then
+    (cd "$NEXUS_DIR/.." && pwd)
+  fi
+}
+
+resolve_nexus_config_path_optional() {
+  local nexus_root
+  local candidate
+
+  nexus_root="$(resolve_nexus_root_dir_optional || true)"
+  [ -n "$nexus_root" ] || return
+
+  for candidate in \
+    "$nexus_root/Config/NexusControlConfig.cfg" \
+    "$nexus_root/config/NexusControlConfig.cfg"; do
+    if [ -f "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return
+    fi
+  done
+
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return
+  done < <(find "$nexus_root" -maxdepth 6 -type f -iname 'NexusControlConfig.cfg' | sort -f)
+}
+
+sync_nexus_sql_config() {
+  local config_path
+  local sql_database_xml
+  local sql_username_xml
+  local sql_password_xml
+
+  config_path="$(resolve_nexus_config_path_optional || true)"
+  [ -n "$config_path" ] || err "Unable to locate NexusControlConfig.cfg under the extracted Nexus Controller directory."
+
+  grep -q '<SQLDatabase>' "$config_path" || err "Missing <SQLDatabase> in $config_path"
+  grep -q '<SQLUsername>' "$config_path" || err "Missing <SQLUsername> in $config_path"
+  grep -q '<SQLPassword>' "$config_path" || err "Missing <SQLPassword> in $config_path"
+
+  sql_database_xml="$(escape_sed_replacement "$(xml_escape_text "$SQL_DATABASE")")"
+  sql_username_xml="$(escape_sed_replacement "$(xml_escape_text "$SQL_USERNAME")")"
+  sql_password_xml="$(escape_sed_replacement "$(xml_escape_text "$SQL_PASSWORD")")"
+
+  sed -i \
+    -e "s|<SQLDatabase>[^<]*</SQLDatabase>|<SQLDatabase>$sql_database_xml</SQLDatabase>|g" \
+    -e "s|<SQLUsername>[^<]*</SQLUsername>|<SQLUsername>$sql_username_xml</SQLUsername>|g" \
+    -e "s|<SQLPassword>[^<]*</SQLPassword>|<SQLPassword>$sql_password_xml</SQLPassword>|g" \
+    "$config_path"
+
+  log "Updated Nexus SQL config in $config_path (database '$SQL_DATABASE', user '$SQL_USERNAME', port $SQL_PORT remains unchanged in config)."
+}
+
+run_nexus() {
+  local exe
+  exe="$(resolve_nexus_exe_required)"
+  local exe_dir
+  exe_dir="$(cd "$(dirname "$exe")" && pwd)"
+  local dotnet_root_win='C:\Program Files\dotnet'
+  local dotnet_root_x86_win='C:\Program Files (x86)\dotnet'
+  local hostfxr_version
+
+  export WINEPREFIX="$WINEPREFIX"
+  mkdir -p "$WINEPREFIX"
+  hostfxr_version="$(find_nexus_dotnet_hostfxr_version || true)"
+  [ -n "$hostfxr_version" ] || err "Missing Windows hostfxr.dll in $WINEPREFIX. Remove $WINEPREFIX/$DOTNET8_MARKER_NAME and rerun the wrapper to reinstall the runtime."
+
+  log "Activation warning from Nexus docs: first activation binds machine and IP to license."
+  log "Forcing Wine .NET host resolution to $dotnet_root_win (hostfxr $hostfxr_version) to avoid leaked Linux DOTNET_ROOT settings."
+  log "Launching Nexus Controller via Wine: $exe"
+  (
+    cd "$exe_dir"
+    env \
+      -u DOTNET_ROOT \
+      -u DOTNET_ROOT_X64 \
+      -u DOTNET_ROOT_X86 \
+      -u 'DOTNET_ROOT(x86)' \
+      DOTNET_ROOT="$dotnet_root_win" \
+      DOTNET_ROOT_X64="$dotnet_root_win" \
+      DOTNET_ROOT_X86="$dotnet_root_x86_win" \
+      "DOTNET_ROOT(x86)=$dotnet_root_x86_win" \
+      DOTNET_MULTILEVEL_LOOKUP=0 \
+      wine "$exe" "$@"
+  )
+}
+
+run_inside_distrobox() {
+  local -a forward_args=("$@")
+  local distrobox_name="${DISTROBOX_NAME:-$DISTROBOX_NAME_DEFAULT}"
+  local launch_cwd="${LAUNCH_CWD:-$PWD}"
+
+  have distrobox || err "distrobox backend selected but 'distrobox' is not installed."
+  have distrobox-enter || err "distrobox backend selected but 'distrobox-enter' is not installed."
+
+  log "Preparing distrobox container '$distrobox_name' with home '$launch_cwd'"
+  distrobox create --yes --name "$distrobox_name" --image quay.io/toolbx/ubuntu-toolbox:latest --home "$launch_cwd"
+
+  log "Entering distrobox '$distrobox_name' and reinvoking wrapper"
+  distrobox-enter --name "$distrobox_name" -- "$0" "${forward_args[@]}"
+}
+
+RUN=0
+INSTALL_NEW=0
+LICENSE_GUID=""
+SKIP_POSTGRES=0
+WINEPREFIX="$WINEPREFIX_DEFAULT"
+NEXUS_EXE=""
+NEXUS_ARGS=()
+BACKEND="$BACKEND_DEFAULT"
+BACKEND_SET=0
+SQL_DATABASE="${NEXUS_SQL_DATABASE:-$NEXUS_SQL_DATABASE_DEFAULT}"
+SQL_USERNAME="${NEXUS_SQL_USERNAME:-$NEXUS_SQL_USERNAME_DEFAULT}"
+SQL_PASSWORD="${NEXUS_SQL_PASSWORD:-$NEXUS_SQL_PASSWORD_DEFAULT}"
+SQL_PORT="$NEXUS_SQL_PORT_DEFAULT"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --run)
+      RUN=1
+      shift
+      ;;
+    --install-new)
+      INSTALL_NEW=1
+      shift
+      ;;
+    --backend)
+      shift
+      [ "$#" -gt 0 ] || err "--backend requires one of: auto, wine, distrobox"
+      BACKEND="$1"
+      BACKEND_SET=1
+      shift
+      ;;
+    --license-guid)
+      shift
+      [ "$#" -gt 0 ] || err "--license-guid requires a GUID"
+      LICENSE_GUID="$1"
+      shift
+      ;;
+    --wineprefix)
+      shift
+      [ "$#" -gt 0 ] || err "--wineprefix requires a path"
+      WINEPREFIX="$1"
+      shift
+      ;;
+    --nexus-dir)
+      shift
+      [ "$#" -gt 0 ] || err "--nexus-dir requires a path"
+      NEXUS_DIR="$1"
+      shift
+      ;;
+    --nexus-exe)
+      shift
+      [ "$#" -gt 0 ] || err "--nexus-exe requires a path"
+      NEXUS_EXE="$1"
+      shift
+      ;;
+    --sql-database)
+      shift
+      [ "$#" -gt 0 ] || err "--sql-database requires a value"
+      SQL_DATABASE="$1"
+      shift
+      ;;
+    --sql-user)
+      shift
+      [ "$#" -gt 0 ] || err "--sql-user requires a value"
+      SQL_USERNAME="$1"
+      shift
+      ;;
+    --sql-password)
+      shift
+      [ "$#" -gt 0 ] || err "--sql-password requires a value"
+      SQL_PASSWORD="$1"
+      shift
+      ;;
+    --skip-postgres)
+      SKIP_POSTGRES=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      NEXUS_ARGS=("$@")
+      break
+      ;;
+    *)
+      err "Unknown option: $1"
+      ;;
+  esac
+done
+
+if [ "$RUN" -ne 1 ]; then
+  usage
+  exit 1
+fi
+
+case "$BACKEND" in
+  auto|wine|distrobox)
+    ;;
+  *)
+    err "Invalid --backend '$BACKEND'. Valid values: auto, wine, distrobox"
+    ;;
+esac
+
+if [ -z "$LICENSE_GUID" ] && [ -n "${NEXUS_LICENSE_GUID:-}" ]; then
+  LICENSE_GUID="$NEXUS_LICENSE_GUID"
+fi
+
+[ -n "$SQL_DATABASE" ] || err "SQL database name cannot be empty."
+[ -n "$SQL_USERNAME" ] || err "SQL username cannot be empty."
+[ -n "$SQL_PASSWORD" ] || err "SQL password cannot be empty."
+
+if [ "$SKIP_POSTGRES" -eq 0 ] && is_immutable_os; then
+  err "Native PostgreSQL install was requested on an immutable OS. Install PostgreSQL on host manually, or rerun with --skip-postgres."
+fi
+
+if [ "$BACKEND" = "auto" ]; then
+  BACKEND="$(select_backend_for_auto)"
+fi
+
+if [ "$BACKEND_SET" -eq 0 ] && [ "$BACKEND" = "wine" ] && is_immutable_os && have distrobox && have distrobox-enter; then
+  log "Immutable OS detected with distrobox available; switching backend to distrobox to avoid host package installation."
+  BACKEND="distrobox"
+fi
+
+ensure_system_postgres
+
+if [ "$SKIP_POSTGRES" -eq 0 ]; then
+  ensure_nexus_postgres_role_and_database
+fi
+
+if [ "$BACKEND" = "distrobox" ]; then
+  log "Distrobox backend selected. If controller uses host PostgreSQL, configure SQL hostname to host IP or host alias, not localhost."
+  RERUN_ARGS=(--run --backend wine --wineprefix "$WINEPREFIX" --nexus-dir "$NEXUS_DIR" --skip-postgres)
+  if [ "$INSTALL_NEW" -eq 1 ]; then
+    RERUN_ARGS+=(--install-new)
+  fi
+  if [ -n "$LICENSE_GUID" ]; then
+    RERUN_ARGS+=(--license-guid "$LICENSE_GUID")
+  fi
+  if [ -n "$NEXUS_EXE" ]; then
+    RERUN_ARGS+=(--nexus-exe "$NEXUS_EXE")
+  fi
+  RERUN_ARGS+=(--sql-database "$SQL_DATABASE" --sql-user "$SQL_USERNAME" --sql-password "$SQL_PASSWORD")
+  if [ "${#NEXUS_ARGS[@]}" -gt 0 ]; then
+    RERUN_ARGS+=(-- "${NEXUS_ARGS[@]}")
+  fi
+  run_inside_distrobox "${RERUN_ARGS[@]}"
+  exit 0
+fi
+
+ensure_linux_dependencies
+download_nexus_if_needed
+sync_nexus_sql_config
+ensure_winetricks_dependencies
+ensure_wine_windows_version
+ensure_nexus_dotnet8_runtime
+apply_wine_gdi_patch
+run_nexus "${NEXUS_ARGS[@]}"
