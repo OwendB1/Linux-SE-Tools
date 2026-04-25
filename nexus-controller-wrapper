@@ -20,6 +20,7 @@ NEXUS_SQL_DATABASE_DEFAULT="ControllerData"
 NEXUS_SQL_USERNAME_DEFAULT="postgres"
 NEXUS_SQL_PASSWORD_DEFAULT="defaultpass"
 NEXUS_SQL_PORT_DEFAULT="5432"
+SQL_PASSWORD_MARKER_NAME=".nexus-controller-wrapper-sql-password"
 
 usage() {
   cat <<USAGE
@@ -35,7 +36,9 @@ Options:
   --nexus-exe <path>     Explicit path to Nexus Controller executable.
   --sql-database <name>  Nexus PostgreSQL database name (default: $NEXUS_SQL_DATABASE_DEFAULT).
   --sql-user <name>      Nexus PostgreSQL login role (default: $NEXUS_SQL_USERNAME_DEFAULT).
-  --sql-password <pass>  Nexus PostgreSQL password (default: $NEXUS_SQL_PASSWORD_DEFAULT).
+  --sql-password <pass>  Nexus PostgreSQL password. Fresh install uses
+                        $NEXUS_SQL_PASSWORD_DEFAULT until config exists.
+                        Then wrapper applies this or generates one.
   --skip-postgres        Skip native PostgreSQL package install/start on the host.
   -h, --help             Show help.
 
@@ -50,6 +53,10 @@ Environment:
   NEXUS_SQL_DATABASE     PostgreSQL database name written into NexusControlConfig.cfg.
   NEXUS_SQL_USERNAME     PostgreSQL role written into NexusControlConfig.cfg.
   NEXUS_SQL_PASSWORD     PostgreSQL password written into NexusControlConfig.cfg.
+                        Fresh install uses $NEXUS_SQL_PASSWORD_DEFAULT until
+                        config exists. If unset after that and config still uses
+                        $NEXUS_SQL_PASSWORD_DEFAULT, wrapper generates and
+                        reuses per-prefix password.
 
 Examples:
   ./$(basename "$0") --run --license-guid 01234567-89ab-cdef-0123-456789abcdef
@@ -153,8 +160,64 @@ xml_escape_text() {
   printf '%s\n' "$value"
 }
 
+xml_unescape_text() {
+  local value="$1"
+  value="${value//&lt;/<}"
+  value="${value//&gt;/>}"
+  value="${value//&quot;/\"}"
+  value="${value//&apos;/\'}"
+  value="${value//&amp;/&}"
+  printf '%s\n' "$value"
+}
+
 escape_sed_replacement() {
   printf '%s' "$1" | sed 's/[&|\\]/\\&/g'
+}
+
+sql_password_state_path() {
+  printf '%s/%s\n' "$WINEPREFIX" "$SQL_PASSWORD_MARKER_NAME"
+}
+
+read_sql_password_state() {
+  local state_path
+  local password
+
+  state_path="$(sql_password_state_path)"
+  [ -r "$state_path" ] || return 1
+
+  IFS= read -r password < "$state_path" || true
+  password="${password%$'\r'}"
+  [ -n "$password" ] || return 1
+  [ "$password" != "$NEXUS_SQL_PASSWORD_DEFAULT" ] || return 1
+  printf '%s\n' "$password"
+}
+
+write_sql_password_state() {
+  local password="$1"
+  local state_path
+
+  [ -n "$password" ] || return 1
+  mkdir -p "$WINEPREFIX"
+  state_path="$(sql_password_state_path)"
+  (
+    umask 077
+    printf '%s\n' "$password" > "$state_path"
+  )
+}
+
+generate_random_sql_password() {
+  if [ -r /dev/urandom ] && have od; then
+    od -An -N24 -tx1 /dev/urandom | tr -d ' \n'
+    printf '\n'
+    return
+  fi
+
+  if have openssl; then
+    openssl rand -hex 24
+    return
+  fi
+
+  err "Unable to generate a random SQL password because neither /dev/urandom+od nor openssl is available."
 }
 
 detect_pm() {
@@ -1113,6 +1176,80 @@ resolve_nexus_config_path_optional() {
   done < <(find "$nexus_root" -maxdepth 6 -type f -iname 'NexusControlConfig.cfg' | sort -f)
 }
 
+read_nexus_config_tag_value() {
+  local tag="$1"
+  local config_path
+  local raw_value
+
+  config_path="$(resolve_nexus_config_path_optional || true)"
+  [ -n "$config_path" ] || return 1
+
+  raw_value="$(grep -m1 -o "<$tag>[^<]*</$tag>" "$config_path" | sed -e "s|<$tag>||" -e "s|</$tag>||" || true)"
+  [ -n "$raw_value" ] || return 1
+  xml_unescape_text "$raw_value"
+}
+
+resolve_effective_sql_password() {
+  local config_path
+  local config_password
+  local saved_password
+
+  FIRST_RUN_SQL_BOOTSTRAP=0
+  config_path="$(resolve_nexus_config_path_optional || true)"
+
+  if [ -z "$config_path" ]; then
+    FIRST_RUN_SQL_BOOTSTRAP=1
+
+    if [ "$SQL_PASSWORD_SET" -eq 1 ] && [ "$REQUESTED_SQL_PASSWORD" != "$NEXUS_SQL_PASSWORD_DEFAULT" ]; then
+      write_sql_password_state "$REQUESTED_SQL_PASSWORD"
+      log "Config missing. Saved explicit SQL password for apply after controller creates config."
+    else
+      saved_password="$(read_sql_password_state || true)"
+      if [ -n "$saved_password" ]; then
+        log "Config missing. Reusing saved SQL password for apply after controller creates config."
+      else
+        saved_password="$(generate_random_sql_password)"
+        write_sql_password_state "$saved_password"
+        log "Config missing. Generated SQL password for apply after controller creates config."
+      fi
+    fi
+
+    SQL_PASSWORD="$NEXUS_SQL_PASSWORD_DEFAULT"
+    log "Config missing. First controller launch uses default SQL password so config can be created."
+    return
+  fi
+
+  if [ "$SQL_PASSWORD_SET" -eq 1 ]; then
+    SQL_PASSWORD="$REQUESTED_SQL_PASSWORD"
+    if [ "$SQL_PASSWORD" != "$NEXUS_SQL_PASSWORD_DEFAULT" ]; then
+      write_sql_password_state "$SQL_PASSWORD"
+    fi
+    log "Using explicitly configured Nexus SQL password."
+    return
+  fi
+
+  config_password="$(read_nexus_config_tag_value SQLPassword || true)"
+  if [ -n "$config_password" ] && [ "$config_password" != "$NEXUS_SQL_PASSWORD_DEFAULT" ]; then
+    SQL_PASSWORD="$config_password"
+    write_sql_password_state "$SQL_PASSWORD"
+    log "Using existing non-default SQL password from NexusControlConfig.cfg."
+    return
+  fi
+
+  saved_password="$(read_sql_password_state || true)"
+  if [ -n "$saved_password" ]; then
+    SQL_PASSWORD="$saved_password"
+    log "Reusing previously generated Nexus SQL password for this Wine prefix."
+    return
+  fi
+
+  if [ "$SQL_PASSWORD" = "$NEXUS_SQL_PASSWORD_DEFAULT" ]; then
+    SQL_PASSWORD="$(generate_random_sql_password)"
+    write_sql_password_state "$SQL_PASSWORD"
+    log "Generated a new Nexus SQL password because the configuration was still using the default password."
+  fi
+}
+
 sync_nexus_sql_config() {
   local config_path
   local sql_database_xml
@@ -1120,7 +1257,10 @@ sync_nexus_sql_config() {
   local sql_password_xml
 
   config_path="$(resolve_nexus_config_path_optional || true)"
-  [ -n "$config_path" ] || err "Unable to locate NexusControlConfig.cfg under the extracted Nexus Controller directory."
+  if [ -z "$config_path" ]; then
+    log "NexusControlConfig.cfg not present yet. Controller must create it on first launch."
+    return 0
+  fi
 
   grep -q '<SQLDatabase>' "$config_path" || err "Missing <SQLDatabase> in $config_path"
   grep -q '<SQLUsername>' "$config_path" || err "Missing <SQLUsername> in $config_path"
@@ -1137,6 +1277,29 @@ sync_nexus_sql_config() {
     "$config_path"
 
   log "Updated Nexus SQL config in $config_path (database '$SQL_DATABASE', user '$SQL_USERNAME', port $SQL_PORT remains unchanged in config)."
+}
+
+finalize_first_run_sql_bootstrap() {
+  local config_path
+
+  [ "$FIRST_RUN_SQL_BOOTSTRAP" -eq 1 ] || return 0
+
+  config_path="$(resolve_nexus_config_path_optional || true)"
+  if [ -z "$config_path" ]; then
+    log "Controller exited without creating NexusControlConfig.cfg. Keeping bootstrap SQL password for now."
+    return 0
+  fi
+
+  log "Controller created NexusControlConfig.cfg. Applying saved/generated SQL password for future launches."
+  resolve_effective_sql_password
+  [ "$FIRST_RUN_SQL_BOOTSTRAP" -eq 0 ] || err "NexusControlConfig.cfg still unresolved after bootstrap run."
+
+  if [ "$SKIP_POSTGRES" -eq 0 ]; then
+    ensure_nexus_postgres_role_and_database
+  fi
+
+  sync_nexus_sql_config
+  log "Bootstrap complete. Restart controller to use updated SQL password."
 }
 
 run_nexus() {
@@ -1198,8 +1361,17 @@ BACKEND="$BACKEND_DEFAULT"
 BACKEND_SET=0
 SQL_DATABASE="${NEXUS_SQL_DATABASE:-$NEXUS_SQL_DATABASE_DEFAULT}"
 SQL_USERNAME="${NEXUS_SQL_USERNAME:-$NEXUS_SQL_USERNAME_DEFAULT}"
-SQL_PASSWORD="${NEXUS_SQL_PASSWORD:-$NEXUS_SQL_PASSWORD_DEFAULT}"
+SQL_PASSWORD="$NEXUS_SQL_PASSWORD_DEFAULT"
+REQUESTED_SQL_PASSWORD="$NEXUS_SQL_PASSWORD_DEFAULT"
 SQL_PORT="$NEXUS_SQL_PORT_DEFAULT"
+SQL_PASSWORD_SET=0
+FIRST_RUN_SQL_BOOTSTRAP=0
+
+if [ "${NEXUS_SQL_PASSWORD+x}" = x ]; then
+  SQL_PASSWORD="$NEXUS_SQL_PASSWORD"
+  REQUESTED_SQL_PASSWORD="$NEXUS_SQL_PASSWORD"
+  SQL_PASSWORD_SET=1
+fi
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -1258,6 +1430,8 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -gt 0 ] || err "--sql-password requires a value"
       SQL_PASSWORD="$1"
+      REQUESTED_SQL_PASSWORD="$1"
+      SQL_PASSWORD_SET=1
       shift
       ;;
     --skip-postgres)
@@ -1313,6 +1487,8 @@ if [ "$BACKEND_SET" -eq 0 ] && [ "$BACKEND" = "wine" ] && is_immutable_os && hav
   BACKEND="distrobox"
 fi
 
+resolve_effective_sql_password
+
 ensure_system_postgres
 
 if [ "$SKIP_POSTGRES" -eq 0 ]; then
@@ -1331,7 +1507,10 @@ if [ "$BACKEND" = "distrobox" ]; then
   if [ -n "$NEXUS_EXE" ]; then
     RERUN_ARGS+=(--nexus-exe "$NEXUS_EXE")
   fi
-  RERUN_ARGS+=(--sql-database "$SQL_DATABASE" --sql-user "$SQL_USERNAME" --sql-password "$SQL_PASSWORD")
+  RERUN_ARGS+=(--sql-database "$SQL_DATABASE" --sql-user "$SQL_USERNAME")
+  if [ "$SQL_PASSWORD_SET" -eq 1 ]; then
+    RERUN_ARGS+=(--sql-password "$SQL_PASSWORD")
+  fi
   if [ "${#NEXUS_ARGS[@]}" -gt 0 ]; then
     RERUN_ARGS+=(-- "${NEXUS_ARGS[@]}")
   fi
@@ -1346,4 +1525,13 @@ ensure_winetricks_dependencies
 ensure_wine_windows_version
 ensure_nexus_dotnet8_runtime
 apply_wine_gdi_patch
-run_nexus "${NEXUS_ARGS[@]}"
+
+nexus_status=0
+if run_nexus "${NEXUS_ARGS[@]}"; then
+  nexus_status=0
+else
+  nexus_status=$?
+fi
+
+finalize_first_run_sql_bootstrap
+exit "$nexus_status"
